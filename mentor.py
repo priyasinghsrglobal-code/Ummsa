@@ -14,9 +14,9 @@ def route(text,history,selection):
     now=time.time();calls[:]=[t for t in calls if now-t<60]
     if len(calls)>=5: raise DataError('Free AI limit busy hai. Ek minute baad try karo; /start se chart analysis bhi select kar sakte ho.')
     calls.append(now)
-    payload={'systemInstruction':{'parts':[{'text':SYSTEM}]},'contents':[{'role':'user','parts':[{'text':json.dumps({'recent_conversation':history[-12:],'selection':selection,'message':text[:3000]},ensure_ascii=False)}]}],'generationConfig':{'responseMimeType':'application/json','temperature':0.3,'maxOutputTokens':1200,'thinkingConfig':{'thinkingBudget':0}}}
+    payload={'systemInstruction':{'parts':[{'text':SYSTEM}]},'contents':[{'role':'user','parts':[{'text':json.dumps({'recent_conversation':history[-12:],'selection':selection,'message':text[:3000]},ensure_ascii=False)}]}],'generationConfig':{'responseMimeType':'application/json','temperature':0.3,'maxOutputTokens':1200,'thinkingConfig':{'thinkingLevel':'minimal'}}}
     try:
-        req=Request('https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent',data=json.dumps(payload).encode(),headers={'Content-Type':'application/json','x-goog-api-key':GEMINI_KEY})
+        req=Request('https://generativelanguage.googleapis.com/v1beta/models/gemini-3.1-flash-lite:generateContent',data=json.dumps(payload).encode(),headers={'Content-Type':'application/json','x-goog-api-key':GEMINI_KEY})
         with urlopen(req,timeout=25) as r: data=json.loads(r.read(100000))
         answer=json.loads(''.join(p.get('text','') for p in data['candidates'][0]['content']['parts']))
         if answer.get('action') not in ('chat','analyze') or not isinstance(answer.get('reply'),str): raise ValueError()
