@@ -1,9 +1,10 @@
 import json, os, time, logging, signal, threading
 from urllib.request import Request, urlopen
+from urllib.error import HTTPError
 from urllib.parse import urlencode
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from engine import SYMBOLS,TIMEFRAMES,DataError,validate,report
-from chart import render
+from mentor import route, snapshot, TV
 
 log=logging.getLogger('sr');logging.basicConfig(level=logging.INFO,format='%(levelname)s %(message)s')
 TOKEN=os.environ.get('TELEGRAM_BOT_TOKEN',''); KEY=os.environ.get('TWELVE_DATA_API_KEY','')
@@ -13,6 +14,8 @@ def request(url,data=None,headers=None,timeout=40):
     try:
         with urlopen(Request(url,data=data,headers=headers or {}),timeout=timeout) as r:
             return json.loads(r.read(2_000_000))
+    except HTTPError as exc:
+        raise DataError(f'Provider HTTP {exc.code}; request unavailable.') from None
     except Exception:
         # Never log exceptions containing token-bearing URLs or provider response text.
         raise DataError('Connection unavailable or provider request rejected. Please try again later.') from None
@@ -50,6 +53,41 @@ def candles(symbol,tf):
     bars=validate(payload,symbol,tf,now);cache[k]=(now,payload)
     return bars
 
+sessions={}
+def session(chat):
+    now=time.time()
+    for k,v in list(sessions.items()):
+        if now-v['updated']>3600:sessions.pop(k,None)
+    if chat not in sessions:
+        if len(sessions)>=1000:sessions.pop(next(iter(sessions)))
+        sessions[chat]={'updated':now,'history':[],'selection':{}}
+    sessions[chat]['updated']=now
+    return sessions[chat]
+
+def analyze_for_chat(chat,symbol,tf,method):
+    now=time.time()
+    if now-cooldowns.get(chat,0)<15:
+        send(chat,'Ek analysis abhi process hua hai—15 seconds baad try karo.');return
+    cooldowns[chat]=now
+    for uid,stamp in list(cooldowns.items()):
+        if now-stamp>120:cooldowns.pop(uid,None)
+    state=session(chat);state['selection']={'symbol':symbol,'timeframe':tf,'method':method}
+    send(chat,f'{symbol} ka {tf} chart aur closed candles check kar raha hoon…')
+    try:
+        bars=candles(symbol,tf)
+        try:
+            png=snapshot(symbol,tf);photo(chat,png)
+            send(chat,f'TradingView snapshot via CHART-IMG: {TV[symbol]} • {tf}. Snapshot mein forming candle ho sakti hai. Neeche analysis Twelve Data closed candles ka hai; feeds/prices differ kar sakte hain.')
+            log.info('TradingView image delivered')
+        except DataError as exc:
+            send(chat,str(exc));log.warning('TradingView image unavailable')
+        result=report(bars,symbol,tf,method)
+        send(chat,result)
+        state['history'].append({'role':'assistant','text':f'Provided {symbol} {tf} {method} analysis. Numeric levels must be refreshed before follow-up.'})
+        log.info('Validated market analysis delivered')
+    except DataError as exc:
+        send(chat,str(exc));log.warning('Market data unavailable; analysis withheld')
+
 def handle(update):
     q=update.get('callback_query');m=q.get('message',{}) if q else update.get('message',{})
     chat=m.get('chat',{}).get('id')
@@ -57,30 +95,54 @@ def handle(update):
     if m.get('chat',{}).get('type')!='private':
         if q:telegram('answerCallbackQuery',callback_query_id=q['id'],text='Open the bot in a private chat.')
         return
+    state=session(chat)
     if not q:
-        send(chat,'SR Market View\nSelect a symbol. Analysis uses provider candles; screenshot uploads are not required.',buttons([(s,'s:'+s) for s in SYMBOLS]))
+        text=m.get('text','').strip()
+        if text.split('@')[0] in ('/start','/help','/reset'):
+            state['history']=[];state['selection']={}
+            send(chat,'Hi! Main SR Market View, tumhara AI trading mentor. Kis market ko dekhna hai? Seedha message karo, jaise “Gold ka 15m SMC analysis”, ya Select a symbol neeche se. Free trial: messages Gemini ko processing ke liye jaate hain; personal/account details share mat karna.',buttons([(s,'s:'+s) for s in SYMBOLS]));return
+        if not text:
+            send(chat,'Abhi text mein baat kar sakte hain. Apna sawaal type kar do—chart main khud fetch karunga.');return
+        telegram('sendChatAction',chat_id=chat,action='typing')
+        try:
+            answer=route(text,state['history'],state['selection'])
+            state['history'].append({'role':'user','text':text[:3000]})
+            for key in ('symbol','timeframe','method'):
+                if answer.get(key):state['selection'][key]=answer[key]
+            if answer['action']=='analyze':
+                sel=state['selection']
+                if not sel.get('symbol'):reply='Kaunsa symbol dekhna hai—Gold, EURUSD ya koi aur?'
+                elif not sel.get('timeframe'):reply='Kaunsa timeframe dekhein—5m, 15m, 30m, 1h ya 4h?'
+                elif not sel.get('method'):reply='SMC se dekhein ya Price Action se?'
+                else:
+                    analyze_for_chat(chat,sel['symbol'],sel['timeframe'],sel['method']);return
+            else:reply=answer['reply'][:3500]
+            send(chat,reply or 'Apna sawaal thoda aur detail mein batao?')
+            state['history'].append({'role':'assistant','text':reply});state['history']=state['history'][-12:]
+            log.info('AI conversation reply delivered')
+        except DataError as exc:send(chat,str(exc));log.warning('AI conversation unavailable')
         return
     telegram('answerCallbackQuery',callback_query_id=q['id'])
     parts=q.get('data','').split(':')
     if len(parts)==2 and parts[0]=='s' and parts[1] in SYMBOLS:
+        state['selection']={'symbol':parts[1]}
         send(chat,'Select timeframe',buttons([(tf,f't:{parts[1]}:{tf}') for tf in TIMEFRAMES]));return
     if len(parts)==3 and parts[0]=='t' and parts[1] in SYMBOLS and parts[2] in TIMEFRAMES:
+        state['selection']={'symbol':parts[1],'timeframe':parts[2]}
         send(chat,'Select analysis method',buttons([(v,f'a:{parts[1]}:{parts[2]}:{v}') for v in ('SMC','Price Action')]));return
-    if len(parts)!=4 or parts[0]!='a' or parts[1] not in SYMBOLS or parts[2] not in TIMEFRAMES or parts[3] not in ('SMC','Price Action'):
-        send(chat,'Invalid selection. Send /start to begin.');return
-    now=time.time();cooldowns_copy=list(cooldowns.items())
-    for user,t in cooldowns_copy:
-        if now-t>60:cooldowns.pop(user,None)
-    if now-cooldowns.get(chat,0)<15:
-        send(chat,'Please wait 15 seconds between analyses.');return
-    cooldowns[chat]=now
-    _,symbol,tf,method=parts
-    try:
-        bars=candles(symbol,tf)
-        png=render(bars,symbol,tf,method)
-        photo(chat,png)
-        send(chat,report(bars,symbol,tf,method),buttons([('New analysis','s:'+symbol)]))
-    except DataError as exc:send(chat,str(exc))
+    if len(parts)==4 and parts[0]=='a' and parts[1] in SYMBOLS and parts[2] in TIMEFRAMES and parts[3] in ('SMC','Price Action'):
+        analyze_for_chat(chat,*parts[1:]);return
+    send(chat,'Selection samajh nahi aaya. /start se dobara shuru karein?')
+
+def service_probe():
+    # One bounded startup probe per service; never sends Telegram messages.
+    for label,probe in [('Gemini',lambda: route('Say hello briefly.',[],{})),('TradingView',lambda: snapshot('EURUSD','5m')),('Market data',lambda: candles('EURUSD','5m'))]:
+        try:
+            probe();log.info('%s startup check passed',label)
+        except DataError as exc:
+            log.warning('%s startup check failed: %s',label,str(exc))
+        except Exception:
+            log.warning('%s startup check failed; details suppressed',label)
 
 class Health(BaseHTTPRequestHandler):
     def do_GET(self):
@@ -102,6 +164,8 @@ def main():
         global running
         running=False
     signal.signal(signal.SIGTERM,stop);signal.signal(signal.SIGINT,stop)
+    threading.Thread(target=service_probe,daemon=True).start()
+    last_poll=time.time()  # Allow rollout healthcheck before old polling worker drains.
     offset=0;log.info('SR Market View polling started')
     while running:
         try:
@@ -109,8 +173,15 @@ def main():
             last_poll=time.time()
             for update in updates:
                 try:handle(update)
-                except Exception:log.warning('Update handling failed; sensitive details suppressed')
+                except Exception:
+                    log.warning('Update handling failed; sensitive details suppressed')
+                    msg=update.get('message') or update.get('callback_query',{}).get('message',{})
+                    if msg.get('chat',{}).get('type')=='private':
+                        try:send(msg['chat']['id'],'Reply process nahi ho paaya. Ek baar dobara try karo.')
+                        except Exception:pass
                 offset=update['update_id']+1
+        except DataError as exc:
+            log.warning('Polling unavailable: %s',str(exc));time.sleep(5)
         except Exception:
             log.warning('Polling unavailable; retrying');time.sleep(5)
     return 0
