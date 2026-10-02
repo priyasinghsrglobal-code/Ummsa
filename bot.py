@@ -1,4 +1,4 @@
-import json, os, time, logging, signal, threading
+import json, os, time, logging, signal, threading, re
 from urllib.request import Request, urlopen
 from urllib.error import HTTPError
 from urllib.parse import urlencode
@@ -64,27 +64,37 @@ def session(chat):
     sessions[chat]['updated']=now
     return sessions[chat]
 
-def analyze_for_chat(chat,symbol,tf,method):
-    now=time.time()
-    if now-cooldowns.get(chat,0)<15:
-        send(chat,'Ek analysis abhi process hua hai—15 seconds baad try karo.');return
-    cooldowns[chat]=now
-    for uid,stamp in list(cooldowns.items()):
-        if now-stamp>120:cooldowns.pop(uid,None)
+def wants_chart(text):
+    lower=text.lower()
+    if re.search(r"\b(no|not|without|nahi|nhi|mat|don't|dont)\b|नहीं|मत",lower):return False
+    # Explicit image intent, not merely a reference to a chart/concept.
+    return bool(re.search(r'\b(chart|graph|snapshot|image|photo)\b|चार्ट',lower) and re.search(r'\b(show|send|display|dikhao|dikha|bhejo|bhej|do|please|pls|chahiye)\b|दिखाओ|भेजो',lower))
+
+def chart_for_chat(chat,symbol,tf):
+    try:
+        photo(chat,snapshot(symbol,tf))
+        send(chat,f'{TV[symbol]} • {tf} • TradingView via CHART-IMG. Snapshot; feed analysis se differ kar sakti hai.')
+        log.info('Requested TradingView image delivered')
+    except DataError as exc:send(chat,str(exc))
+
+def analyze_for_chat(chat,symbol,tf,method,question=None):
     state=session(chat);state['selection']={'symbol':symbol,'timeframe':tf,'method':method}
-    send(chat,f'{symbol} ka {tf} chart aur closed candles check kar raha hoon…')
     try:
         bars=candles(symbol,tf)
+        facts=report(bars,symbol,tf,method)
         try:
-            png=snapshot(symbol,tf);photo(chat,png)
-            send(chat,f'TradingView snapshot via CHART-IMG: {TV[symbol]} • {tf}. Snapshot mein forming candle ho sakti hai. Neeche analysis Twelve Data closed candles ka hai; feeds/prices differ kar sakte hain.')
-            log.info('TradingView image delivered')
-        except DataError as exc:
-            send(chat,str(exc));log.warning('TradingView image unavailable')
-        result=report(bars,symbol,tf,method)
-        send(chat,result)
-        state['history'].append({'role':'assistant','text':f'Provided {symbol} {tf} {method} analysis. Numeric levels must be refreshed before follow-up.'})
-        log.info('Validated market analysis delivered')
+            reply=route(question or 'Give a short current analysis: trend, key levels and conditional scenarios with invalidation.',state['history'],state['selection'],facts=facts)['reply'][:1500]
+        except DataError:
+            from engine import analyze
+            a=analyze(bars,method)
+            reply=f"{symbol} {tf}: {a['trend']}. Support {a['support']:.5f}, resistance {a['resistance']:.5f}. Resistance ke upar close aur retest hold ho toh bullish scenario; support ke neeche bearish. Breakout level ke andar close aaye toh scenario invalid."
+        from datetime import datetime, timezone
+        stamp=datetime.fromtimestamp(bars[-1]['t']+TIMEFRAMES[tf][1],timezone.utc).strftime('%d %b %H:%M UTC')
+        reply += f'\nTwelve Data • candle close {stamp}'
+        send(chat,reply)
+        state['history'].append({'role':'assistant','text':reply})
+        state['history']=state['history'][-12:]
+        log.info('Short text market answer delivered; no chart requested')
     except DataError as exc:
         send(chat,str(exc));log.warning('Market data unavailable; analysis withheld')
 
@@ -100,23 +110,28 @@ def handle(update):
         text=m.get('text','').strip()
         if text.split('@')[0] in ('/start','/help','/reset'):
             state['history']=[];state['selection']={}
-            send(chat,'Hi! Main SR Market View, tumhara AI trading mentor. Kis market ko dekhna hai? Seedha message karo, jaise “Gold ka 15m SMC analysis”, ya Select a symbol neeche se. Free trial: messages Gemini ko processing ke liye jaate hain; personal/account details share mat karna.',buttons([(s,'s:'+s) for s in SYMBOLS]));return
+            send(chat,'Hi! Main SR ka AI trading mentor. Jo poochna hai seedha bolo 🙂 Chart chahiye toh “chart dikhao” likhna.');return
         if not text:
             send(chat,'Abhi text mein baat kar sakte hain. Apna sawaal type kar do—chart main khud fetch karunga.');return
         telegram('sendChatAction',chat_id=chat,action='typing')
         try:
             answer=route(text,state['history'],state['selection'])
             state['history'].append({'role':'user','text':text[:3000]})
+            if answer.get('symbol') and answer['symbol']!=state['selection'].get('symbol'):
+                state['selection']={}
             for key in ('symbol','timeframe','method'):
                 if answer.get(key):state['selection'][key]=answer[key]
-            if answer['action']=='analyze':
+            if answer['action'] in ('analyze','chart') or wants_chart(text):
                 sel=state['selection']
                 if not sel.get('symbol'):reply='Kaunsa symbol dekhna hai—Gold, EURUSD ya koi aur?'
                 elif not sel.get('timeframe'):reply='Kaunsa timeframe dekhein—5m, 15m, 30m, 1h ya 4h?'
-                elif not sel.get('method'):reply='SMC se dekhein ya Price Action se?'
                 else:
-                    analyze_for_chat(chat,sel['symbol'],sel['timeframe'],sel['method']);return
-            else:reply=answer['reply'][:3500]
+                    if wants_chart(text):
+                        chart_for_chat(chat,sel['symbol'],sel['timeframe'])
+                    else:
+                        analyze_for_chat(chat,sel['symbol'],sel['timeframe'],sel.get('method','Price Action'),question=text)
+                    return
+            else:reply=answer['reply'][:1500]
             send(chat,reply or 'Apna sawaal thoda aur detail mein batao?')
             state['history'].append({'role':'assistant','text':reply});state['history']=state['history'][-12:]
             log.info('AI conversation reply delivered')

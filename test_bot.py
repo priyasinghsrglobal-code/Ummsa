@@ -60,7 +60,7 @@ class EngineTests(unittest.TestCase):
         import bot
         msg={'chat':{'id':1,'type':'private'},'text':'/start'}
         with patch.object(bot,'telegram') as tg,patch.object(bot,'send') as send:
-            bot.handle({'message':msg});self.assertIn('Select a symbol',send.call_args.args[1])
+            bot.handle({'message':msg});self.assertIn('AI trading mentor',send.call_args.args[1])
             bot.handle({'callback_query':{'id':'1','message':msg,'data':'s:EURUSD'}})
             self.assertEqual(send.call_args.args[1],'Select timeframe')
             bot.handle({'callback_query':{'id':'2','message':msg,'data':'t:EURUSD:5m'}})
