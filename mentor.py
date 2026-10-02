@@ -24,7 +24,7 @@ def route(text,history,selection):
         return answer
     except HTTPError as e:
         code=e.code
-        raise DataError('Free AI quota abhi available nahi hai. Thodi der baad try karo; /start ka analysis menu available hai.' if code==429 else 'AI service connect nahi ho paayi. /start se analysis menu use kar sakte ho.') from None
+        raise DataError('Free AI quota abhi available nahi hai. Thodi der baad try karo; /start ka analysis menu available hai.' if code==429 else f'AI service connect nahi ho paayi (HTTP {code}). /start se analysis menu use kar sakte ho.') from None
     except Exception:
         raise DataError('AI reply abhi complete nahi ho paaya. Dobara try karo ya /start se analysis select karo.') from None
 
