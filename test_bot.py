@@ -58,18 +58,19 @@ class EngineTests(unittest.TestCase):
         self.assertTrue(result.startswith(b'\x89PNG'))
     def test_callback_flow(self):
         import bot
-        msg={'chat':{'id':1,'type':'private'},'text':'/start'}
+        msg={'from':{'id':1},'chat':{'id':1,'type':'private'},'text':'/start'}
         with patch.object(bot,'telegram') as tg,patch.object(bot,'send') as send:
-            bot.handle({'message':msg});self.assertIn('AI trading mentor',send.call_args.args[1])
-            bot.handle({'callback_query':{'id':'1','message':msg,'data':'s:EURUSD'}})
+            bot.handle({'message':msg});self.assertIn('AI assistant',send.call_args.args[1])
+            bot.handle({'callback_query':{'from':{'id':1},'id':'1','message':msg,'data':'s:EURUSD'}})
             self.assertEqual(send.call_args.args[1],'Select timeframe')
-            bot.handle({'callback_query':{'id':'2','message':msg,'data':'t:EURUSD:5m'}})
+            bot.handle({'callback_query':{'from':{'id':1},'id':'2','message':msg,'data':'t:EURUSD:5m'}})
             self.assertEqual(send.call_args.args[1],'Select analysis method')
     def test_failure_never_charts(self):
         import bot
         bot.cooldowns.clear()
         with patch.object(bot,'telegram'),patch.object(bot,'send') as send,patch.object(bot,'candles',side_effect=engine.DataError('Data unavailable')),patch.object(bot,'photo') as photo:
-            bot.handle({'callback_query':{'id':'3','message':{'chat':{'id':5,'type':'private'}},'data':'a:EURUSD:5m:SMC'}})
+            bot.handle({'callback_query':{'from':{'id':5},'id':'3','message':{'chat':{'id':5,'type':'private'}},'data':'a:EURUSD:5m:SMC'}})
             photo.assert_not_called();self.assertEqual(send.call_args.args[1],'Data unavailable')
 
 if __name__=='__main__': unittest.main()
+
