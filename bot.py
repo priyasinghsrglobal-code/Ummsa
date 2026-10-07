@@ -165,7 +165,7 @@ def handle_inner(update):
         except DataError as exc:
             features.issue(chat,text)
             features.event('ai_failure')
-            send(chat,str(exc)+' SR help ke liye /sr, aur market selection ke liye /menu available hai.')
+            send(chat, 'Abhi jawab dene mein dikkat aa rahi hai. Thodi der baad dobara try karein.' if features.language(text,state)=='hi' else 'I’m having trouble replying right now. Please try again shortly.')
             log.warning('AI conversation unavailable')
         return
     telegram('answerCallbackQuery',callback_query_id=q['id'])
@@ -288,4 +288,5 @@ if __name__=='__main__':
     try:raise SystemExit(main())
     except Exception:
         log.error('Startup failed; check credentials and service connectivity');raise SystemExit(1)
+
 
