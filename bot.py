@@ -68,15 +68,78 @@ def session(chat):
     return sessions[chat]
 
 def wants_chart(text):
-    lower=text.lower()
-    if re.search(r"\b(no|not|without|nahi|nhi|mat|don't|dont)\b|नहीं|मत",lower):return False
-    # Explicit image intent, not merely a reference to a chart/concept.
-    return bool(re.search(r'\b(chart|graph|snapshot|image|photo)\b|चार्ट',lower) and re.search(r'\b(show|send|display|dikhao|dikha|bhejo|bhej|do|please|pls|chahiye)\b|दिखाओ|भेजो',lower))
+    t=text.lower()
+    if re.search(r"\b(no|not|without|nahi|nhi|mat|don't|dont)\b|नहीं|मत",t):return False
+    return bool(re.search(r'\b(chart|graph|snapshot|image|photo)\b|चार्ट',t) and (re.search(r'\b(show|send|display|dikhao|dikha|bhejo|bhej|do|please|pls|chahiye)\b|दिखाओ|भेजो',t) or re.fullmatch(r'(?:gold |silver |[A-Z]{6} )?(?:chart|graph)(?: \d+[mh])?',text,re.I)))
+
+def remember(state,text,reply):
+    state['history'].extend([{'role':'user','text':text[:3000]},{'role':'assistant','text':reply[:1500]}])
+    state['history']=state['history'][-12:]
+
+def reset_requested(text):
+    t=text.lower().strip(' .!?')
+    if re.search(r"\b(don't|dont|not|nahi|nhi|mat)\b",t):return False
+    return bool(re.fullmatch(r'(?:please )?(?:start fresh(?: topic)?|new topic|reset(?: chat| conversation)?|forget (?:past|previous|old) (?:conversation|chat)|purani (?:baat|chat) bhool jao|naya topic)(?:[ ,;]+(?:forget (?:past|previous|old) (?:conversation|chat)|start fresh(?: topic)?))*',t))
+
+def fast_reply(text,state,message):
+    hi=features.language(text,state)=='hi'
+    t=text.lower().strip(' .!?')
+    if reset_requested(text):
+        state['history']=[];state['selection']={};state['pending']=None;state['last_failure']=None
+        return 'Bilkul, nayi baat shuru karte hain. Kya discuss karein?' if hi else 'Sure, let’s start fresh. What would you like to discuss?'
+    if re.fullmatch(r'(?:hi|hy|hello|hey|hii+|namaste)(?: bhai| bro| dost)?(?:[, ]+(?:kaise ho|kaisa hai|how are you))?',t):
+        return 'Hi bhai 👋 Main yahin hoon, help ke liye ready. Tum kaise ho?' if hi else 'Hey 👋 I’m here and ready to help. How are you?'
+    why=bool(re.fullmatch(r'(?:kyun|kyu|kyon|why|why is that|kya hua|what happened|what is the problem)',t))
+    quoted=message.get('reply_to_message',{}).get('text','')
+    failure=state.get('last_failure')
+    if why and ((failure and time.time()-failure.get('at',0)<600 and not quoted) or any(x in quoted for x in ('jawab dene mein dikkat','trouble replying','AI service connect'))):
+        return 'AI service se jawab nahi aa paaya tha. Aapke message mein koi problem nahi hai. Greetings, SR info aur fresh start phir bhi kaam karte hain.' if hi else 'The AI service could not respond. Nothing is wrong with your message. Greetings, SR information and starting fresh still work.'
+    definitions={
+        'smc':('SMC mein market structure, liquidity aur price imbalances ko study karte hain. Yeh market samajhne ka framework hai, guaranteed signal nahi.','SMC studies market structure, liquidity and price imbalances. It is an analysis framework, not a guaranteed signal.'),
+        'price action':('Price action ka matlab candles, swing highs/lows aur levels par price ki reaction se market samajhna.','Price action means reading candles, swing highs and lows, and how price reacts at key levels.'),
+        'stop loss':('Stop loss woh exit level hai jo trade galat jaane par loss limit karne ke liye set karte hain. Fast market mein execution price alag ho sakta hai.','A stop loss is an exit level intended to limit loss when a trade goes against you. Execution can differ in a fast market.')}
+    for term,answers in definitions.items():
+        if re.fullmatch(r'(?:what is |explain )?'+re.escape(term)+r'(?: kya hai| samjhao)?(?:[, ]+(?:simple mein batao|simply|please))?',t):
+            return answers[0 if hi else 1]
+    return None
+
+def direct_market(text,state):
+    t=text.lower()
+    sym=next((x for x in SYMBOLS if re.search(r'\b'+x.lower()+r'\b',t)),None)
+    for alias,value in [('gold','XAUUSD'),('silver','XAGUSD'),('bitcoin','BTCUSD'),('ethereum','ETHUSD')]:
+        if re.search(r'\b'+alias+r'\b',t):sym=value
+    match=re.search(r'\b(5m|15m|30m|1h|4h)\b',t)
+    tf=match[1] if match else None
+    chart=wants_chart(text)
+    analysis=bool(re.search(r'\b(analysis|analyse|analyze|outlook|trend|price|levels)\b',t)) and bool(sym or state['selection'].get('symbol'))
+    pending=state.get('pending')
+    # Only a short slot answer continues the outstanding request.
+    slot=bool(re.fullmatch(r'(?:gold|silver|bitcoin|ethereum|[a-z]{6}|5m|15m|30m|1h|4h)(?: (?:5m|15m|30m|1h|4h))?',t.strip()))
+    if not (chart or analysis or (pending and slot)):return None
+    if re.search(r'\b(nasdaq|us30|us100|nifty|banknifty|wti|xtiusd|oil|solusd|solana)\b',t):
+        state['pending']=None
+        return ('ask','Is symbol ka verified data abhi connected nahi hai. Gold, Silver, forex majors, BTCUSD ya ETHUSD choose karein.')
+    requested_tf=re.search(r'\b(\d+(?:m|h|d|w))\b',t)
+    if requested_tf and requested_tf[1] not in TIMEFRAMES:
+        state['pending']=None
+        return ('ask','Yeh timeframe supported nahi hai. 5m, 15m, 30m, 1h ya 4h choose karein.')
+    if re.search(r'\b(what is|kya hai|meaning|samjhao|explain)\b',t):return None
+    sel=state['selection']
+    if sym and sym!=sel.get('symbol'):sel.clear()
+    if sym:sel['symbol']=sym
+    if tf:sel['timeframe']=tf
+    action='chart' if chart else (pending['action'] if pending and slot else 'analyze')
+    state['pending']={'action':action,'question':pending['question'] if pending and slot else text}
+    if not sel.get('symbol'):return ('ask','Kaunsa symbol dekhein—Gold, EURUSD ya koi aur?')
+    if not sel.get('timeframe'):return ('ask','Kaunsa timeframe—5m, 15m, 30m, 1h ya 4h?')
+    question=state['pending']['question'];state['pending']=None
+    return (action,question)
 
 def chart_for_chat(chat,symbol,tf):
     try:
         photo(chat,snapshot(symbol,tf))
         send(chat,f'{TV[symbol]} • {tf} • TradingView via CHART-IMG. Snapshot; feed analysis se differ kar sakti hai.')
+        session(chat)['history'].append({'role':'assistant','text':f'TradingView chart image delivered for {symbol} {tf}.'})
         log.info('Requested TradingView image delivered')
     except DataError as exc:send(chat,str(exc))
 
@@ -114,7 +177,7 @@ def handle_inner(update):
         cmd=text.split()[0].split('@')[0].lower() if text else ''
         if cmd in ('/start','/reset'):
             if cmd=='/reset':
-                state['history']=[];state['selection']={};state['preferences']={}
+                state['history']=[];state['selection']={};state['preferences']={};state['pending']=None;state['last_failure']=None
             send(chat,features.WELCOME if cmd=='/start' else 'Conversation aur preferences clear ho gaye. Journal aur watchlist retained hain; /delete_my_data se sab erase kar sakte hain.')
             return
         if cmd=='/menu':
@@ -131,18 +194,34 @@ def handle_inner(update):
             send(chat,'Input format check karein. Prices/amounts finite positive numbers hone chahiye; command without values se example milega.');return
         if text.startswith('/'):
             send(chat,'Command recognise nahi hua. /help mein available options hain.');return
-        if re.fullmatch(r'(hi|hy|hello|hey|namaste|hii+)[! .👋]*',text.lower()):
-            send(chat,'Hi 👋 Kaise help karun?' if features.language(text,state)=='hi' else 'Hi 👋 How can I help?');return
+        quick=fast_reply(text,state,m)
+        if quick is not None:
+            remember(state,text,quick);send(chat,quick);return
+        direct=direct_market(text,state)
+        if direct:
+            kind,question=direct
+            if kind=='ask':remember(state,text,question);send(chat,question);return
+            state['history'].append({'role':'user','text':text[:3000]})
+            sel=state['selection'];state['last_failure']=None
+            if kind=='chart':chart_for_chat(chat,sel['symbol'],sel['timeframe'])
+            else:analyze_for_chat(chat,sel['symbol'],sel['timeframe'],sel.get('method','Price Action'),question=question)
+            return
+        state['pending']=None
         topic=features.faq_topic(text)
         if topic:
             reply=features.faq_answer(topic,state,text)
+            if not re.search(r'\b(link|url|website|portal|contact|email)\b',text,re.I):
+                reply=re.sub(r'Official website:\s*https?://\S+','',reply)
+                reply=re.sub(r'https?://\S+','official website',reply).strip()
             send(chat,reply,features.feedback_buttons(chat,'sr_faq'))
             state['history'].extend([{'role':'user','text':text[:3000]},{'role':'assistant','text':reply}]);return
         if not text:
             send(chat,'Abhi text mein baat kar sakte hain. Apna sawaal type kar do—chart main khud fetch karunga.');return
-        telegram('sendChatAction',chat_id=chat,action='typing')
+        try:telegram('sendChatAction',chat_id=chat,action='typing')
+        except DataError:pass
         try:
-            answer=route(text,state['history'],{**state['selection'],'preferences':state.get('preferences',{})})
+            answer=route(text,state['history'],{**state['selection'],'preferences':state.get('preferences',{}),'reply_to':m.get('reply_to_message',{}).get('text','')[:1500]})
+            state['last_failure']=None
             state['history'].append({'role':'user','text':text[:3000]})
             if answer.get('symbol') and answer['symbol']!=state['selection'].get('symbol'):
                 state['selection']={}
@@ -150,9 +229,11 @@ def handle_inner(update):
                 if answer.get(key):state['selection'][key]=answer[key]
             if answer['action'] in ('analyze','chart') or wants_chart(text):
                 sel=state['selection']
+                state['pending']={'action':'chart' if wants_chart(text) else 'analyze','question':text}
                 if not sel.get('symbol'):reply='Kaunsa symbol dekhna hai—Gold, EURUSD ya koi aur?'
                 elif not sel.get('timeframe'):reply='Kaunsa timeframe dekhein—5m, 15m, 30m, 1h ya 4h?'
                 else:
+                    state['pending']=None
                     if wants_chart(text):
                         chart_for_chat(chat,sel['symbol'],sel['timeframe'])
                     else:
@@ -165,7 +246,10 @@ def handle_inner(update):
         except DataError as exc:
             features.issue(chat,text)
             features.event('ai_failure')
-            send(chat, 'Abhi jawab dene mein dikkat aa rahi hai. Thodi der baad dobara try karein.' if features.language(text,state)=='hi' else 'I’m having trouble replying right now. Please try again shortly.')
+            reply='Abhi jawab dene mein dikkat aa rahi hai. Thodi der baad dobara try karein.' if features.language(text,state)=='hi' else 'I’m having trouble replying right now. Please try again shortly.'
+            remember(state,text,reply)
+            state['last_failure']={'at':time.time()}
+            send(chat,reply)
             log.warning('AI conversation unavailable')
         return
     telegram('answerCallbackQuery',callback_query_id=q['id'])
@@ -228,6 +312,13 @@ def deliver_reminders():
             with features.connect() as db:db.execute('UPDATE alerts SET due=? WHERE id=?',(time.time()+300,row['id']))
 
 
+def conversation_probe():
+    try:
+        route('Say hello briefly.',[],{})
+        log.info('AI conversation startup check passed')
+    except DataError:
+        log.warning('AI conversation startup check unavailable; local conversation features remain ready')
+
 def service_probe():
     # One bounded startup probe per service; never sends Telegram messages.
     for label,probe in [('Gemini',lambda: route('Say hello briefly.',[],{})),('TradingView',lambda: snapshot('EURUSD','5m')),('Market data',lambda: candles('EURUSD','5m'))]:
@@ -262,6 +353,8 @@ def main():
     signal.signal(signal.SIGTERM,stop);signal.signal(signal.SIGINT,stop)
     if os.getenv('STARTUP_PROBE','false').lower()=='true':
         threading.Thread(target=service_probe,daemon=True).start()
+    if os.getenv('AI_STARTUP_CHECK','true').lower()=='true':
+        threading.Thread(target=conversation_probe,daemon=True).start()
     last_poll=time.time()  # Allow rollout healthcheck before old polling worker drains.
     offset=0;log.info('SR Market View polling started')
     while running:

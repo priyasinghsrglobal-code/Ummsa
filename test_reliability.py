@@ -45,7 +45,7 @@ class ReliabilityTests(unittest.TestCase):
     def test_handler_does_not_append_commands(self):
         state={'history':[],'selection':{}}
         with patch('bot.session',return_value=state), patch('bot.features.command',return_value=None), patch('bot.features.numbers_review',return_value=None), patch('bot.features.faq_topic',return_value=None), patch('bot.features.issue'), patch('bot.features.language',return_value='hi'), patch('bot.telegram'), patch('bot.send') as send, patch('bot.route',side_effect=DataError('HTTP 503 /menu')):
-            bot.handle_inner({'message':{'chat':{'id':1,'type':'private'},'text':'SMC kya hai?'}})
+            bot.handle_inner({'message':{'chat':{'id':1,'type':'private'},'text':'Explain an advanced concept'}})
             reply=send.call_args.args[1]
             self.assertNotIn('503',reply)
             self.assertNotIn('/menu',reply)

@@ -58,7 +58,7 @@ def load_user(uid):
     return json.loads(r[0]) if r else {'history':[],'selection':{},'preferences':{},'watchlist':[]}
 
 def save_user(uid,state):
-    clean={k:state.get(k,v) for k,v in [('history',[]),('selection',{}),('preferences',{}),('watchlist',[])]}
+    clean={k:state.get(k,v) for k,v in [('history',[]),('selection',{}),('preferences',{}),('watchlist',[]),('pending',None),('last_failure',None)]}
     clean['history']=clean['history'][-12:]
     with connect() as db:db.execute('INSERT OR REPLACE INTO users VALUES (?,?)',(uid,json.dumps(clean)))
 
@@ -99,7 +99,7 @@ def feedback(uid,data):
 def language(text,state):
     pref=state.get('preferences',{}).get('language')
     if pref in ('english','hinglish','hindi'):return 'en' if pref=='english' else 'hi'
-    return 'hi' if re.search(r'\b(kya|hai|ka|kaise|mujhe|batao|chahiye|karna|nhi|nahi)\b|[\u0900-\u097f]',text.lower()) else 'en'
+    return 'hi' if re.search(r'\b(kya|hai|ho|bhai|kyun|kyu|ka|kaise|mujhe|batao|chahiye|karna|nhi|nahi)\b|[\u0900-\u097f]',text.lower()) else 'en'
 
 def faq_answer(topic,state,text=''):
     entry=setting('faq:'+topic) or FAQ.get(topic)
@@ -232,3 +232,4 @@ def command(uid,text,state):
             with connect() as db:rows=db.execute('SELECT question FROM issues ORDER BY id DESC LIMIT 10').fetchall()
             return '\n'.join(r[0] for r in rows) or 'No recorded unanswered questions.'
     return None
+
