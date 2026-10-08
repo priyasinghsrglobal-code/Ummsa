@@ -40,6 +40,26 @@ class ConversationRecovery(unittest.TestCase):
             self.msg('chart dikhao');self.msg('gold');self.msg('15m')
             chart.assert_called_once_with(1,'XAUUSD','15m');analysis.assert_not_called()
             self.route.assert_not_called()
+    def test_silver_bare_15_uses_chart_not_market_data(self):
+        for value in ('15','15m','15 min','15 minutes'):
+            self.state['selection']={'symbol':'XAUUSD','timeframe':'15m'}
+            self.state['pending']=None
+            with patch('bot.chart_for_chat') as chart,patch('bot.analyze_for_chat') as analysis:
+                self.msg('silver ka chart dikhao');self.msg(value)
+                chart.assert_called_once_with(1,'XAGUSD','15m')
+                analysis.assert_not_called()
+        self.route.assert_not_called()
+    def test_invalid_timeframe_preserves_chart(self):
+        self.state['selection']={}
+        with patch('bot.chart_for_chat') as chart:
+            self.msg('silver chart dikhao');self.msg('7');self.msg('15')
+            chart.assert_called_once_with(1,'XAGUSD','15m')
+    def test_failed_chart_keeps_retry_intent(self):
+        with patch('bot.snapshot',side_effect=DataError('unavailable')):
+            self.msg('silver 15m chart dikhao')
+        self.assertEqual(self.state['pending']['action'],'chart')
+        with patch('bot.chart_for_chat') as chart:
+            self.msg('15m');chart.assert_called_once_with(1,'XAGUSD','15m')
     def test_analysis_never_sends_chart(self):
         with patch('bot.chart_for_chat') as chart,patch('bot.analyze_for_chat') as analysis:
             self.msg('gold 15m analysis');analysis.assert_called_once();chart.assert_not_called()

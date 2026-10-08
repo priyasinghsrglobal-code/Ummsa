@@ -104,7 +104,11 @@ def fast_reply(text,state,message):
     return None
 
 def direct_market(text,state):
-    t=text.lower()
+    t=text.lower().strip()
+    t=re.sub(r'\b(\d+)\s*(?:minutes?|mins?)\b',r'\1m',t)
+    t=re.sub(r'\b(\d+)\s*(?:hours?|hrs?)\b',r'\1h',t)
+    if state.get('pending') and re.fullmatch(r'\d+',t):
+        t={'5':'5m','15':'15m','30':'30m','60':'1h','240':'4h'}.get(t,t)
     sym=next((x for x in SYMBOLS if re.search(r'\b'+x.lower()+r'\b',t)),None)
     for alias,value in [('gold','XAUUSD'),('silver','XAGUSD'),('bitcoin','BTCUSD'),('ethereum','ETHUSD')]:
         if re.search(r'\b'+alias+r'\b',t):sym=value
@@ -114,14 +118,13 @@ def direct_market(text,state):
     analysis=bool(re.search(r'\b(analysis|analyse|analyze|outlook|trend|price|levels)\b',t)) and bool(sym or state['selection'].get('symbol'))
     pending=state.get('pending')
     # Only a short slot answer continues the outstanding request.
-    slot=bool(re.fullmatch(r'(?:gold|silver|bitcoin|ethereum|[a-z]{6}|5m|15m|30m|1h|4h)(?: (?:5m|15m|30m|1h|4h))?',t.strip()))
+    slot=bool(re.fullmatch(r'(?:gold|silver|bitcoin|ethereum|[a-z]{6}|\d+(?:[mhdw])?)(?: (?:5m|15m|30m|1h|4h))?',t.strip()))
     if not (chart or analysis or (pending and slot)):return None
     if re.search(r'\b(nasdaq|us30|us100|nifty|banknifty|wti|xtiusd|oil|solusd|solana)\b',t):
         state['pending']=None
         return ('ask','Is symbol ka verified data abhi connected nahi hai. Gold, Silver, forex majors, BTCUSD ya ETHUSD choose karein.')
     requested_tf=re.search(r'\b(\d+(?:m|h|d|w))\b',t)
-    if requested_tf and requested_tf[1] not in TIMEFRAMES:
-        state['pending']=None
+    if (requested_tf and requested_tf[1] not in TIMEFRAMES) or (pending and re.fullmatch(r'\d+',t)):
         return ('ask','Yeh timeframe supported nahi hai. 5m, 15m, 30m, 1h ya 4h choose karein.')
     if re.search(r'\b(what is|kya hai|meaning|samjhao|explain)\b',t):return None
     sel=state['selection']
@@ -136,12 +139,16 @@ def direct_market(text,state):
     return (action,question)
 
 def chart_for_chat(chat,symbol,tf):
+    state=session(chat)
+    state['pending']={'action':'chart','question':f'{symbol} chart dikhao'}
     try:
         photo(chat,snapshot(symbol,tf))
         send(chat,f'{TV[symbol]} • {tf} • TradingView via CHART-IMG. Snapshot; feed analysis se differ kar sakti hai.')
+        state['pending']=None
         session(chat)['history'].append({'role':'assistant','text':f'TradingView chart image delivered for {symbol} {tf}.'})
         log.info('Requested TradingView image delivered')
-    except DataError as exc:send(chat,str(exc))
+    except DataError:
+        send(chat,'Chart abhi load nahi ho paaya. Isi timeframe ko dobara bhejkar retry kar sakte hain.')
 
 def analyze_for_chat(chat,symbol,tf,method,question=None):
     state=session(chat);state['selection']={'symbol':symbol,'timeframe':tf,'method':method}
@@ -162,7 +169,8 @@ def analyze_for_chat(chat,symbol,tf,method,question=None):
         state['history']=state['history'][-12:]
         log.info('Short text market answer delivered; no chart requested')
     except DataError as exc:
-        send(chat,str(exc));log.warning('Market data unavailable; analysis withheld')
+        reply='Is symbol ka market data abhi nahi mil raha. Verified candles ke bina analysis nahi de sakta.' if str(exc).startswith('Provider HTTP') else str(exc)
+        send(chat,reply);log.warning('Market data unavailable; analysis withheld')
 
 def handle_inner(update):
     q=update.get('callback_query');m=q.get('message',{}) if q else update.get('message',{})
