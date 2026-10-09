@@ -29,6 +29,22 @@ FAQ = {
  'regulation': {'en':'The website lists Mauritius FSC investment-dealer licence GB25205088 and UAE CMA licence 20200000413 under SRFX Financial Consultation. These refer to different entities/scopes; confirm the entity serving your account and its permissions.', 'hi':'Website par Mauritius FSC investment-dealer licence GB25205088 aur SRFX Financial Consultation ke under UAE CMA licence 20200000413 listed hain. Dono ka entity/scope alag hai; apne account ki entity aur permissions confirm karein.', 'source':'https://srglobalmarkets.com/'}
 }
 
+# Public company facts checked 2026-10-09; no website marketing claims of guaranteed returns.
+def _fact(en, hi, page):
+    return {'en':en, 'hi':hi, 'source':'https://srglobalmarkets.com/'+page, 'verified_at':1791504000}
+FAQ.update({
+ 'accounts':_fact('Three main trading accounts: Zero, Standard and ECN. Copy Trading and PAMM are also listed separately.', '3 main trading accounts hain: Zero, Standard aur ECN. Copy Trading aur PAMM bhi alag listed hain.', 'accounts/'),
+ 'ecn':_fact('Yes, SR lists an ECN account with raw spreads.', 'Haan, SR mein raw spreads wala ECN account hai.', 'accounts/'),
+ 'spreads':_fact('Published starting spreads: Zero and ECN 0.0 pips. Standard shows conflicting 0.5 and 5.0 figures; confirm that rate with support. These are not live quotes.', 'Zero aur ECN ka advertised spread 0.0 pips se hai. Standard par 0.5 aur 5.0 dono figures hain; exact rate confirm karna hoga. Yeh live quotes nahi hain.', 'accounts/'),
+ 'office':_fact('Dubai regional office: #2304, Zone A, Aspect Tower, Business Bay, Dubai, UAE. Mauritius main office: fourth floor, The Docks 4, Caudan, Port Louis.', 'Dubai regional office: #2304, Zone A, Aspect Tower, Business Bay, Dubai, UAE. Mauritius main office: fourth floor, The Docks 4, Caudan, Port Louis.', 'about/'),
+ 'office_facilities':_fact('Office facilities, visit hours, staff names and training-room availability are not verified. Please confirm your visit with the team.', 'Office ki facilities, visit timings, staff names aur training room ki verified details abhi nahi hain. Visit se pehle team se confirm kar lein.', 'about/'),
+ 'phone':_fact('SR lists +971 56 452 0909 as its sales line. For support: support@srglobalmarkets.com.', 'SR ka listed sales number +971 56 452 0909 hai. Support email: support@srglobalmarkets.com.', 'contact/'),
+ 'support':_fact('Support: support@srglobalmarkets.com (advertised 24/5). Accounts: accounts@srglobalmarkets.com. I cannot see your account or payment status.', 'Support: support@srglobalmarkets.com (website par 24/5). Accounts team: accounts@srglobalmarkets.com. Aapka account ya payment status mere paas nahi dikhta.', 'contact/'),
+ 'ib':_fact('Partnership enquiries: partners@srglobalmarkets.com. The team must confirm your IB commission terms.', 'IB/partnership ke liye partners@srglobalmarkets.com par baat karein. Commission terms team confirm karegi.', 'contact/'),
+ 'account_terms':_fact('Website account cards advertise: Zero deposit $100, maximum $1,000, zero commission, leverage up to 1:500. Standard deposit band $100–$5,000, zero commission, forex/metals/energy leverage 1:200. ECN deposit $5,000+, commission shown as $10, leverage 1:100. Commission charging basis must be confirmed. These are advertised terms, not a personalised offer or live trading conditions.', 'Website cards: Zero deposit $100, maximum $1,000, commission zero, leverage up to 1:500. Standard deposit band $100–$5,000, commission zero, forex/metals/energy leverage 1:200. ECN deposit $5,000+, commission $10 listed, leverage 1:100. Commission kis basis par charge hota hai team se confirm karein. Yeh advertised terms hain.', ''),
+ 'services':_fact('SR lists forex, commodities and indices, MT5/web/mobile platforms, education and calculators. Availability depends on your account.', 'SR par forex, commodities, indices, MT5/web/mobile platforms, education aur calculators listed hain. Availability account par depend karti hai.', ''),
+})
+
 def connect():
     path=os.getenv('BOT_DB_PATH','data/bot.sqlite3');Path(path).parent.mkdir(parents=True,exist_ok=True)
     db=sqlite3.connect(path,timeout=10);db.row_factory=sqlite3.Row
@@ -109,13 +125,20 @@ def faq_answer(topic,state,text=''):
     return entry.get(language(text,state),entry.get('en',''))
 
 def faq_topic(text):
-    t=text.lower()
-    for pattern,topic in [(r'\b(withdraw\w*|deposit\w*|payment|support|customer care)\b','support'),(r'\b(bonus|offer)\b','bonus'),(r'\b(kyc|verification|documents?|address proof)\b','kyc'),(r'\b(ib|partner\w*|affiliate)\b','ib'),(r'\b(regulat\w*|licen[cs]\w*|fsc|cma|sca)\b','regulation'),(r'\b(register|registration|sign.?up|open account|account open)\b','register'),(r'\b(account types?|zero plan|ecn|standard account|sr fees|sr commission|sr leverage|sr spread)\b','accounts'),(r'\b(mt5|metatrader)\b','mt5'),(r'\b(sr|srglobal|srglobalmarkets)\b','about')]:
-        if re.search(pattern,t):return topic
+    """Only short, unambiguous FAQ questions bypass conversation reasoning."""
+    t=re.sub(r'[^a-z0-9\s]', ' ', text.lower());t=' '.join(t.split())
+    if len(t.split())>18 or re.search(r'\b(and|aur|but|lekin|compare|difference|why|kyun|explain)\b',t):return None
+    if re.fullmatch(r'(sr (global markets )?(me |mein )?)?(kitne|kitne types ke|kitne tarah ke) accounts?( hai| hain)?',t):return 'accounts'
+    if re.search(r'\baccounts?\b',t) and re.search(r'\b(types?|kinds?|kitne|many)\b',t):return 'accounts'
+    if re.fullmatch(r'(sr (me |mein )?)?ecn( hai| hai kya| available| available hai)?',t):return 'ecn'
+    if re.search(r'\b(support|contact|sales|sr)\b',t) and re.search(r'\b(number|phone|call|mobile)\b',t):return 'phone'
+    if re.search(r'\b(office|offices)\b',t) and re.search(r'\b(where|kaha|kahan|address|location|located)\b',t):return 'office'
+    if re.fullmatch(r'(sr |sr global markets |sr global )?(kya hai|ke baare me batao|ke bare mein batao|about|information)',t) or t=='what is sr global markets':return 'about'
+    # Complex, contextual and general trading questions go to the grounded AI.
     return None
 
 def knowledge():
-    return {k:faq_answer(k,{'preferences':{'language':'english'}}) for k in FAQ}
+    return {k:{'answer':faq_answer(k,{'preferences':{'language':'english'}}), 'source':(setting('faq:'+k) or v).get('source'), 'verified_at':(setting('faq:'+k) or v).get('verified_at',1791288000)} for k,v in FAQ.items()}
 
 def review(side,entry,sl,tp):
     vals=[float(x) for x in (entry,sl,tp)]

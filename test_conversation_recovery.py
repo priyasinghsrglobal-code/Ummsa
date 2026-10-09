@@ -19,6 +19,28 @@ class ConversationRecovery(unittest.TestCase):
         if quote:m['reply_to_message']={'text':quote}
         bot.handle_inner({'message':m})
         return self.send.call_args.args[1] if self.send.call_args else ""
+    def test_sr_account_paraphrases(self):
+        for question in ('sr me kitne types ke accounts hai', 'how many types of account are in sr global markets', 'SR account types?', 'kitne accounts hai'):
+            reply=self.msg(question)
+            self.assertIn('Zero',reply);self.assertIn('Standard',reply);self.assertIn('ECN',reply)
+        self.assertIn('ECN',self.msg('ecn hai ?'))
+        self.assertIn('+971 56 452 0909',self.msg('support number do'))
+        self.assertIn('Aspect Tower',self.msg('sr ka office kaha hai'))
+        self.route.assert_not_called()
+    def test_contextual_questions_reach_ai_with_history(self):
+        self.route.side_effect=None
+        self.route.return_value={'action':'chat','reply':'Grounded contextual answer'}
+        self.msg('ecn hai ?')
+        for question in ('spreads kya hai ?', 'uska commission?', 'SR office me kya kya facilities hain?', 'SR aur ECN accounts compare karo', 'support and resistance kya hai', 'SR ke bare me detail me samjhao', 'why is the sky blue?'):
+            self.assertEqual(self.msg(question),'Grounded contextual answer')
+        self.assertIn('ECN',str(self.route.call_args.args[1]))
+    def test_knowledge_sources_and_unknown_facilities(self):
+        knowledge=features.knowledge()
+        self.assertIn('not verified',knowledge['office_facilities']['answer'])
+        self.assertEqual(knowledge['office']['source'],'https://srglobalmarkets.com/about/')
+        features.put_setting('faq:office',{'en':'Owner approved location','hi':'Approved','verified_at':time.time(),'source':'owner-approved'})
+        self.assertEqual(features.knowledge()['office']['answer'],'Owner approved location')
+
     def test_screenshot_sequence(self):
         self.assertIn('ready',self.msg('hy bhai kaise ho'))
         self.assertIn('Hey',self.msg('hy'))
