@@ -301,8 +301,10 @@ def handle(update):
     if len(cooldowns)>2000:
         for k,v in list(cooldowns.items()):
             if not v or now-v[-1]>60:cooldowns.pop(k,None)
+    started=time.monotonic()
     try:handle_inner(update)
     finally:
+        log.info("Reply handler completed; elapsed_ms=%s",round((time.monotonic()-started)*1000))
         if chat in sessions:
             features.save_user(chat,sessions[chat])
             if text=='/delete_my_data confirm':

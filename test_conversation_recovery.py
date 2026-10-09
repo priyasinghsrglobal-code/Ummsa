@@ -19,6 +19,23 @@ class ConversationRecovery(unittest.TestCase):
         if quote:m['reply_to_message']={'text':quote}
         bot.handle_inner({'message':m})
         return self.send.call_args.args[1] if self.send.call_args else ""
+    def test_spread_screenshot_fast_brand_voice(self):
+        reply=self.msg('spreads kitne he sr me')
+        self.assertTrue(reply.startswith('Hamare'))
+        self.assertIn('0.0',reply)
+        self.assertNotIn('0.5',reply);self.assertNotIn('5.0',reply)
+        self.assertNotIn('support@',reply)
+        self.route.assert_not_called()
+    def test_specific_spreads_and_complex_queries_keep_reasoning(self):
+        for text in ('sr ecn spread kitna hai', 'sr live gold spread?', 'sr spread aur commission batao', 'spread kya hai?', 'uska spread?'):
+            self.assertIsNone(features.faq_topic(text))
+    def test_knowledge_uses_one_connection_and_expiry(self):
+        features.put_setting('faq:phone',{'en':'Old number','verified_at':time.time()-31*86400})
+        with patch('features.connect',wraps=features.connect) as connection:
+            result=features.knowledge()
+        self.assertEqual(connection.call_count,1)
+        self.assertNotIn('Old number',result['phone']['answer'])
+
     def test_sr_account_paraphrases(self):
         for question in ('sr me kitne types ke accounts hai', 'how many types of account are in sr global markets', 'SR account types?', 'kitne accounts hai'):
             reply=self.msg(question)

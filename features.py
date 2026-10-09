@@ -45,6 +45,20 @@ FAQ.update({
  'services':_fact('SR lists forex, commodities and indices, MT5/web/mobile platforms, education and calculators. Availability depends on your account.', 'SR par forex, commodities, indices, MT5/web/mobile platforms, education aur calculators listed hain. Availability account par depend karti hai.', ''),
 })
 
+# Customer-facing voice; source metadata remains separate for factual grounding.
+for _topic, _en, _hi in [
+ ('about','Welcome to SR Global Markets! We offer forex/CFD trading with MT5. What would you like to know?', 'SR Global Markets mein welcome! Hum forex/CFD trading aur MT5 provide karte hain. Kya jaanna chahoge?'),
+ ('accounts','We have three main trading accounts: Zero, Standard and ECN. We also offer Copy Trading and PAMM.', 'Hamare 3 main trading accounts hain: Zero, Standard aur ECN. Copy Trading aur PAMM bhi available hain.'),
+ ('ecn','Yes, we offer an ECN account with raw spreads.', 'Haan, hamare yahan raw spreads wala ECN account available hai.'),
+ ('spreads','Our Zero and ECN spreads start from 0.0 pips and vary with the market. Our Standard rate needs confirmation from our team; I do not have a verified figure for it.', 'Hamare Zero aur ECN accounts mein spreads 0.0 pips se shuru hote hain; market ke saath badalte hain. Standard ka exact spread hamari team se confirm karna hoga.'),
+ ('office','Our Dubai office is #2304, Zone A, Aspect Tower, Business Bay. Our Mauritius main office is on the fourth floor, The Docks 4, Caudan, Port Louis.', 'Hamara Dubai office #2304, Zone A, Aspect Tower, Business Bay mein hai. Mauritius main office fourth floor, The Docks 4, Caudan, Port Louis mein hai.'),
+ ('phone','You can reach our sales team on +971 56 452 0909. For support, email support@srglobalmarkets.com.', 'Hamari sales team ka number +971 56 452 0909 hai. Support ke liye support@srglobalmarkets.com par message kar sakte ho.'),
+ ('support','Our support team is available at support@srglobalmarkets.com, 24/5. I cannot view your account or payment status here.', 'Hamari support team support@srglobalmarkets.com par 24/5 available hai. Yahan se aapka account ya payment status check nahi kar sakta.'),
+ ('ib','For an IB partnership, contact our team at partners@srglobalmarkets.com. They will confirm the applicable commission terms.', 'IB partnership ke liye hamari team se partners@srglobalmarkets.com par baat karo. Commission terms team confirm karegi.'),
+]:
+    FAQ[_topic].update(en=_en,hi=_hi)
+
+
 def connect():
     path=os.getenv('BOT_DB_PATH','data/bot.sqlite3');Path(path).parent.mkdir(parents=True,exist_ok=True)
     db=sqlite3.connect(path,timeout=10);db.row_factory=sqlite3.Row
@@ -115,7 +129,7 @@ def feedback(uid,data):
 def language(text,state):
     pref=state.get('preferences',{}).get('language')
     if pref in ('english','hinglish','hindi'):return 'en' if pref=='english' else 'hi'
-    return 'hi' if re.search(r'\b(kya|hai|ho|bhai|kyun|kyu|ka|kaise|mujhe|batao|chahiye|karna|nhi|nahi)\b|[\u0900-\u097f]',text.lower()) else 'en'
+    return 'hi' if re.search(r'\b(kya|hai|hain|kitne|kitna|kahan|kaha|ho|bhai|kyun|kyu|ka|kaise|mujhe|batao|chahiye|karna|nhi|nahi)\b|[\u0900-\u097f]',text.lower()) else 'en'
 
 def faq_answer(topic,state,text=''):
     entry=setting('faq:'+topic) or FAQ.get(topic)
@@ -134,11 +148,23 @@ def faq_topic(text):
     if re.search(r'\b(support|contact|sales|sr)\b',t) and re.search(r'\b(number|phone|call|mobile)\b',t):return 'phone'
     if re.search(r'\b(office|offices)\b',t) and re.search(r'\b(where|kaha|kahan|address|location|located)\b',t):return 'office'
     if re.fullmatch(r'(sr |sr global markets |sr global )?(kya hai|ke baare me batao|ke bare mein batao|about|information)',t) or t=='what is sr global markets':return 'about'
+    if re.search(r'\bspreads?\b',t) and re.search(r'\b(sr|srglobal|srglobalmarkets)\b',t) and not re.search(r'\b(ecn|zero|standard|live|abhi|current|gold|xauusd|eurusd|meaning|definition)\b',t):return 'spreads'
+    if re.fullmatch(r'(sr )?(support|customer care)( email| email do| email kya hai)?',t):return 'support'
+    if re.fullmatch(r'(sr )?(ib|partnership)( contact| email| email do)?',t):return 'ib'
     # Complex, contextual and general trading questions go to the grounded AI.
     return None
 
 def knowledge():
-    return {k:{'answer':faq_answer(k,{'preferences':{'language':'english'}}), 'source':(setting('faq:'+k) or v).get('source'), 'verified_at':(setting('faq:'+k) or v).get('verified_at',1791288000)} for k,v in FAQ.items()}
+    # One database snapshot instead of three connections per knowledge topic.
+    with connect() as db:
+        overrides={row[0][4:]:json.loads(row[1]) for row in db.execute("SELECT key,value FROM settings WHERE key LIKE 'faq:%'")}
+    result={}
+    for topic,default in FAQ.items():
+        entry=overrides.get(topic) or default
+        stamp=entry.get('verified_at',1791288000)
+        answer=entry.get('en','') if time.time()-stamp<=30*86400 else 'Needs re-verification with our support team.'
+        result[topic]={'answer':answer,'source':entry.get('source'),'verified_at':stamp}
+    return result
 
 def review(side,entry,sl,tp):
     vals=[float(x) for x in (entry,sl,tp)]
