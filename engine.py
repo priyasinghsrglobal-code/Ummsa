@@ -80,3 +80,107 @@ def report(bars,symbol,tf,method):
         +f'Bearish scenario: closed-candle break below {s:.5f}, then a retest holding below it. Invalidated by a close back above {s:.5f}.\n'
         +f'\nData: Twelve Data | last candle closed {stamp}\nRetrieved: {datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")}\n'
         +'Closed candles only. Rule-based educational scenarios, not trade signals or financial advice. Provider prices may differ from MT5. Trading involves risk.')
+
+
+
+def ema_series(values, period):
+    """SMA seed, then exponential smoothing; missing warmup remains None."""
+    result=[None]*len(values)
+    if len(values)<period:return result
+    value=sum(values[:period])/period;result[period-1]=value
+    alpha=2/(period+1)
+    for i in range(period,len(values)):
+        value=alpha*values[i]+(1-alpha)*value;result[i]=value
+    return result
+
+
+def indicators(bars):
+    if len(bars)<60:raise DataError('At least 60 closed candles needed. No analysis generated.')
+    closes=[b['c'] for b in bars]
+    changes=[b-a for a,b in zip(closes,closes[1:])]
+    gain=sum(max(x,0) for x in changes[:14])/14
+    loss=sum(max(-x,0) for x in changes[:14])/14
+    for x in changes[14:]:
+        gain=(gain*13+max(x,0))/14;loss=(loss*13+max(-x,0))/14
+    rsi=50 if gain==loss==0 else 100 if loss==0 else 100-100/(1+gain/loss)
+    fast=ema_series(closes,12);slow=ema_series(closes,26)
+    macd=[f-s for f,s in zip(fast,slow) if f is not None and s is not None]
+    signal=ema_series(macd,9)
+    histogram=macd[-1]-signal[-1];previous=macd[-2]-signal[-2]
+    cross='bullish crossover on last close' if previous<=0<histogram else 'bearish crossover on last close' if previous>=0>histogram else 'no new crossover'
+    tr=[max(b['h']-b['l'],abs(b['h']-a['c']),abs(b['l']-a['c'])) for a,b in zip(bars,bars[1:])]
+    atr=sum(tr[:14])/14
+    for x in tr[14:]:atr=(13*atr+x)/14
+    return dict(ema20=ema_series(closes,20)[-1],ema50=ema_series(closes,50)[-1],ema200=ema_series(closes,200)[-1],rsi=rsi,macd=macd[-1],signal=signal[-1],histogram=histogram,cross=cross,atr=atr)
+
+
+def reward_risk(entry,stop,target):
+    risk=abs(entry-stop)
+    if risk<=0 or (entry-stop)*(target-entry)<=0:return None
+    return abs(target-entry)/risk
+
+
+def market_setup(bars,method):
+    a=analyze(bars,method);i=indicators(bars);close=bars[-1]['c']
+    bull=[close>i['ema20']>i['ema50'],i['rsi']>=55,i['histogram']>0,a['trend'].startswith('Bullish')]
+    bear=[close<i['ema20']<i['ema50'],i['rsi']<=45,i['histogram']<0,a['trend'].startswith('Bearish')]
+    direction=1 if sum(bull)>=3 else -1 if sum(bear)>=3 else 0
+    score=sum(bull) if direction==1 else sum(bear) if direction==-1 else max(sum(bull),sum(bear))
+    # A deliberately conditional breakout/retest template, not a market order.
+    # Targets are explicit R-multiple projections, never labelled observed resistance.
+    setup=None
+    if direction and i['atr']>0:
+        level=a['resistance'] if direction==1 else a['support']
+        entry=level
+        stop=(a['support']-0.1*i['atr']) if direction==1 else (a['resistance']+0.1*i['atr'])
+        risk=abs(entry-stop)
+        targets=[entry+direction*risk*n for n in (1,2,3)]
+        if entry>0 and stop>0 and all(t>0 for t in targets) and risk>0:
+            setup=dict(direction=direction,entry=entry,stop=stop,targets=targets,
+                       broken=close>level if direction==1 else close<level)
+    return a,i,direction,score,setup
+
+
+def detailed_report(bars,symbol,tf,method):
+    a,i,direction,score,setup=market_setup(bars,method)
+    digits=3 if 'JPY' in symbol else 5 if symbol not in ('XAUUSD','XAGUSD','BTCUSD','ETHUSD') else 2 if symbol!='XAGUSD' else 3
+    def p(value):return f'{value:,.{digits}f}'
+    close=bars[-1]['c'];support=a['support'];resistance=a['resistance']
+    stamp=datetime.fromtimestamp(bars[-1]['t']+TIMEFRAMES[tf][1],timezone.utc).strftime('%Y-%m-%d %H:%M UTC')
+    bias='🟢 BULLISH VIEW' if direction==1 else '🔴 BEARISH VIEW' if direction==-1 else '🟡 MIXED / WAIT'
+    lines=[f'📊 SR MARKET VIEW | {symbol} | {tf} | {method}',bias,
+           f'Confluence: {score}/4 checks aligned — rule-based, not a win probability.',
+           f'Last closed price: {p(close)}','']
+    if setup:
+        side='BUY' if direction==1 else 'SELL';level=p(setup['entry'])
+        condition=f'{tf} close above {level}, then a retest that closes above it' if direction==1 else f'{tf} close below {level}, then a retest that closes below it'
+        lines += [f'📍 CONDITIONAL {side} PLAN — not an immediate entry',
+                  'Status: breakout close seen; retest confirmation still required.' if setup['broken'] else 'Status: waiting for breakout and retest confirmation.',
+                  f'Trigger: {condition}.',f'Entry reference: {level} (planned retest level, not a live quote)',
+                  f'🛑 SL reference: {p(setup["stop"])} | distance {abs(setup["entry"]-setup["stop"])/setup["entry"]*100:.2f}%',
+                  '🎯 Projected targets (risk multiples, NOT observed price levels):']
+        for n,target in enumerate(setup['targets'],1):
+            lines.append(f'TP{n}: {p(target)} | R:R 1:{reward_risk(setup["entry"],setup["stop"],target):.2f}')
+        lines += ['SL uses the opposite range boundary plus a 0.1 ATR buffer. Recalculate R:R for actual fill and costs.',
+                  f'❌ Plan invalidation: a {tf} close back '+('below ' if direction==1 else 'above ')+level+' after the breakout. This is separate from the protective SL.','']
+    else:
+        lines += ['📍 NO TRADE PLAN: indicators conflict or a valid risk setup is unavailable. Entry / SL / targets withheld.','']
+    trend='above' if close>i['ema50'] else 'below' if close<i['ema50'] else 'at'
+    momentum='positive' if i['histogram']>0 else 'negative' if i['histogram']<0 else 'flat'
+    lines += ['🧠 WHY THIS VIEW',f'Structure: {a["trend"]}. Price is {trend} EMA50; MACD histogram is {momentum}.',
+              *a['facts'],
+              'EMA alignment, RSI direction, MACD histogram and confirmed swing structure form the four checks.',
+              '📐 INDICATORS (computed from closed candles)',
+              f'EMA20 {p(i["ema20"])} | EMA50 {p(i["ema50"])} | EMA200 '+(p(i['ema200']) if i['ema200'] is not None else 'unavailable (<200 candles)'),
+              f'RSI14 {i["rsi"]:.1f} | MACD(12,26,9) {i["macd"]:.5f} | signal {i["signal"]:.5f}',
+              f'Histogram {i["histogram"]:.5f}: {i["cross"]}. ATR14 {p(i["atr"])}.','',
+              f'📌 KEY LEVELS — prior 20 closed bars: support {p(support)} | resistance {p(resistance)}',
+              f'Bullish scenario: {tf} close above {p(resistance)} and retest holds. Invalid if close returns below it.',
+              f'Bearish scenario: {tf} close below {p(support)} and retest holds. Invalid if close returns above it.']
+    if i['rsi']>=70 or i['rsi']<=30:lines.append('⚠️ RSI is at an extreme: chasing price is risky; this alone does not predict a reversal.')
+    if i['ema200'] is not None and ((direction==1 and close<i['ema200']) or (direction==-1 and close>i['ema200'])):
+        lines.append('⚠️ Short-term bias opposes EMA200; broader trend confirmation is missing.')
+    lines += ['Projected targets can meet intervening support/resistance; none is guaranteed. Volume/news are not verified in this report.',
+              '',f'🕐 Candle closed: {stamp}',f'Data: Twelve Data | {len(bars)} closed candles | retrieved {datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")}',
+              'Educational scenario, not personalised advice. Feed may differ from MT5/TradingView. Spreads and slippage excluded.']
+    return '\n'.join(lines)

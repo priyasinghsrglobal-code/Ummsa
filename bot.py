@@ -3,7 +3,7 @@ from urllib.request import Request, urlopen
 from urllib.error import HTTPError
 from urllib.parse import urlencode
 from http.server import HTTPServer, BaseHTTPRequestHandler
-from engine import SYMBOLS,TIMEFRAMES,DataError,validate,report
+from engine import SYMBOLS,TIMEFRAMES,DataError,validate,report,detailed_report
 from mentor import route, snapshot, TV
 import features
 
@@ -50,7 +50,7 @@ def candles(symbol,tf):
         raise DataError('Market-data capacity reached. Please retry in one minute.')
     api_calls.append(now)
     features.event('market_data_request')
-    query=urlencode({'symbol':SYMBOLS[symbol],'interval':TIMEFRAMES[tf][0],'outputsize':120,'timezone':'UTC','apikey':KEY})
+    query=urlencode({'symbol':SYMBOLS[symbol],'interval':TIMEFRAMES[tf][0],'outputsize':300,'timezone':'UTC','apikey':KEY})
     payload=request('https://api.twelvedata.com/time_series?'+query,timeout=20)
     bars=validate(payload,symbol,tf,now);cache[k]=(now,payload)
     return bars
@@ -131,6 +131,8 @@ def direct_market(text,state):
     if sym and sym!=sel.get('symbol'):sel.clear()
     if sym:sel['symbol']=sym
     if tf:sel['timeframe']=tf
+    if re.search(r'\bsmc\b',t):sel['method']='SMC'
+    elif 'price action' in t:sel['method']='Price Action'
     action='chart' if chart else (pending['action'] if pending and slot else 'analyze')
     state['pending']={'action':action,'question':pending['question'] if pending and slot else text}
     if not sel.get('symbol'):return ('ask','Kaunsa symbol dekhein—Gold, EURUSD ya koi aur?')
@@ -150,10 +152,22 @@ def chart_for_chat(chat,symbol,tf):
     except DataError:
         send(chat,'Chart abhi load nahi ho paaya. Isi timeframe ko dobara bhejkar retry kar sakte hain.')
 
+def full_analysis_requested(question):
+    if question is None:return True
+    if re.search(r'\b(short|brief|quick|sirf price|only price)\b',question,re.I):return False
+    return bool(re.search(r'\b(analysis|analyse|analyze|outlook|setup|report|detailed|detail)\b',question,re.I))
+
+
 def analyze_for_chat(chat,symbol,tf,method,question=None):
     state=session(chat);state['selection']={'symbol':symbol,'timeframe':tf,'method':method}
     try:
         bars=candles(symbol,tf)
+        if full_analysis_requested(question):
+            reply=detailed_report(bars,symbol,tf,method)
+            send(chat,reply,features.feedback_buttons(chat,'analysis'))
+            remember(state,question or 'Full market analysis',reply)
+            log.info('Detailed computed market report delivered; no generative numeric levels')
+            return
         facts=report(bars,symbol,tf,method)
         try:
             reply=route(question or 'Give a short current analysis: trend, key levels and conditional scenarios with invalidation.',state['history'],{**state['selection'],'preferences':state.get('preferences',{})},facts=facts)['reply'][:1500]
@@ -211,7 +225,9 @@ def handle_inner(update):
             if kind=='ask':remember(state,text,question);send(chat,question);return
             state['history'].append({'role':'user','text':text[:3000]})
             sel=state['selection'];state['last_failure']=None
-            if kind=='chart':chart_for_chat(chat,sel['symbol'],sel['timeframe'])
+            if kind=='chart':
+                chart_for_chat(chat,sel['symbol'],sel['timeframe'])
+                if full_analysis_requested(question):analyze_for_chat(chat,sel['symbol'],sel['timeframe'],sel.get('method','Price Action'),question=question)
             else:analyze_for_chat(chat,sel['symbol'],sel['timeframe'],sel.get('method','Price Action'),question=question)
             return
         state['pending']=None
@@ -244,6 +260,7 @@ def handle_inner(update):
                     state['pending']=None
                     if wants_chart(text):
                         chart_for_chat(chat,sel['symbol'],sel['timeframe'])
+                        if full_analysis_requested(text):analyze_for_chat(chat,sel['symbol'],sel['timeframe'],sel.get('method','Price Action'),question=text)
                     else:
                         analyze_for_chat(chat,sel['symbol'],sel['timeframe'],sel.get('method','Price Action'),question=text)
                     return
@@ -391,5 +408,6 @@ if __name__=='__main__':
     try:raise SystemExit(main())
     except Exception:
         log.error('Startup failed; check credentials and service connectivity');raise SystemExit(1)
+
 
 
