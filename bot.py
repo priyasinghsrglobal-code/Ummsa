@@ -3,7 +3,7 @@ from urllib.request import Request, urlopen
 from urllib.error import HTTPError
 from urllib.parse import urlencode
 from http.server import HTTPServer, BaseHTTPRequestHandler
-from engine import SYMBOLS,TIMEFRAMES,DataError,validate,report,detailed_report
+from engine import SYMBOLS,TIMEFRAMES,DataError,validate,report,detailed_report,compact_report,chart_annotations
 from mentor import route, snapshot, TV
 import features
 
@@ -143,14 +143,22 @@ def direct_market(text,state):
 def chart_for_chat(chat,symbol,tf):
     state=session(chat)
     state['pending']={'action':'chart','question':f'{symbol} chart dikhao'}
+    method=state.get('selection',{}).get('method','Price Action')
     try:
-        photo(chat,snapshot(symbol,tf))
-        send(chat,f'{TV[symbol]} • {tf} • TradingView via CHART-IMG. Snapshot; feed analysis se differ kar sakti hai.')
-        state['pending']=None
-        session(chat)['history'].append({'role':'assistant','text':f'TradingView chart image delivered for {symbol} {tf}.'})
-        log.info('Requested TradingView image delivered')
+        bars=candles(symbol,tf)
     except DataError:
-        send(chat,'Chart abhi load nahi ho paaya. Isi timeframe ko dobara bhejkar retry kar sakte hain.')
+        send(chat,'Verified candles nahi mile, isliye chart par analysis levels nahi bana sakta. Thodi der baad retry karo.')
+        return
+    reply=compact_report(bars,symbol,tf,method)
+    try:
+        photo(chat,snapshot(symbol,tf,annotations=chart_annotations(bars,symbol,tf,method)))
+        send(chat,reply+'\nChart: TradingView; levels: Twelve Data. Feeds may differ. Risk box = entry/SL/TP3; lines = TP1/TP2 when a plan exists.')
+        state['pending']=None
+        remember(state,f'{symbol} {tf} annotated chart',reply)
+        log.info('Annotated TradingView image delivered')
+    except DataError:
+        send(chat,reply+'\nChart annotations load nahi hui; image nahi bheji. Same timeframe bhejkar retry karo.')
+
 
 def full_analysis_requested(question):
     if question is None:return True
@@ -163,7 +171,7 @@ def analyze_for_chat(chat,symbol,tf,method,question=None):
     try:
         bars=candles(symbol,tf)
         if full_analysis_requested(question):
-            reply=detailed_report(bars,symbol,tf,method)
+            reply=(detailed_report if question and re.search(r'\b(full detail|detailed report|explain in detail)\b',question,re.I) else compact_report)(bars,symbol,tf,method)
             send(chat,reply,features.feedback_buttons(chat,'analysis'))
             remember(state,question or 'Full market analysis',reply)
             log.info('Detailed computed market report delivered; no generative numeric levels')
@@ -227,7 +235,6 @@ def handle_inner(update):
             sel=state['selection'];state['last_failure']=None
             if kind=='chart':
                 chart_for_chat(chat,sel['symbol'],sel['timeframe'])
-                if full_analysis_requested(question):analyze_for_chat(chat,sel['symbol'],sel['timeframe'],sel.get('method','Price Action'),question=question)
             else:analyze_for_chat(chat,sel['symbol'],sel['timeframe'],sel.get('method','Price Action'),question=question)
             return
         state['pending']=None
@@ -260,7 +267,6 @@ def handle_inner(update):
                     state['pending']=None
                     if wants_chart(text):
                         chart_for_chat(chat,sel['symbol'],sel['timeframe'])
-                        if full_analysis_requested(text):analyze_for_chat(chat,sel['symbol'],sel['timeframe'],sel.get('method','Price Action'),question=text)
                     else:
                         analyze_for_chat(chat,sel['symbol'],sel['timeframe'],sel.get('method','Price Action'),question=text)
                     return

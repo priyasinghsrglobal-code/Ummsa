@@ -94,7 +94,8 @@ class ConversationRecovery(unittest.TestCase):
             self.msg('silver chart dikhao');self.msg('7');self.msg('15')
             chart.assert_called_once_with(1,'XAGUSD','15m')
     def test_failed_chart_keeps_retry_intent(self):
-        with patch('bot.snapshot',side_effect=DataError('unavailable')):
+        from test_detailed_analysis import bars
+        with patch('bot.candles',return_value=bars()),patch('bot.snapshot',side_effect=DataError('unavailable')):
             self.msg('silver 15m chart dikhao')
         self.assertEqual(self.state['pending']['action'],'chart')
         with patch('bot.chart_for_chat') as chart:
@@ -129,3 +130,4 @@ class ModelFallback(unittest.TestCase):
             self.assertEqual(call.call_args.args[0].get_header('X-goog-api-key'),'test-only')
 
 if __name__=='__main__':unittest.main()
+

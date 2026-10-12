@@ -10,6 +10,33 @@ def bars(direction=1, count=300):
     return result
 
 class DetailedAnalysis(unittest.TestCase):
+    def test_compact_report_and_native_drawings_match(self):
+        for direction in (1,-1):
+            data=bars(direction)
+            setup=engine.market_setup(data,'Price Action')[-1]
+            text=engine.compact_report(data,'XAUUSD','1h','Price Action')
+            self.assertLess(len(text.split()),160)
+            payload=engine.chart_annotations(data,'XAUUSD','1h','Price Action')
+            self.assertEqual(len(payload['drawings']),3)
+            box=payload['drawings'][0]['input']
+            self.assertEqual(box['entryPrice'],setup['entry'])
+            self.assertEqual(box['stopPrice'],setup['stop'])
+            self.assertEqual(box['targetPrice'],setup['targets'][2])
+            self.assertIn(f"{box['entryPrice']:,.2f}",text)
+            self.assertGreater(payload['override']['priceRange']['to'],max(setup['targets']))
+    def test_smc_no_event_no_plan_or_risk_box(self):
+        self.assertIsNone(engine.market_setup(bars(),'SMC')[-1])
+        drawings=engine.chart_annotations(bars(),'XAUUSD','1h','SMC')['drawings']
+        self.assertTrue(all(x['name']=='Horizontal Line' for x in drawings))
+    def test_chart_delivers_compact_text_from_same_candles(self):
+        state=dict(selection={'method':'Price Action'},history=[])
+        with patch('bot.session',return_value=state),patch('bot.candles',return_value=bars()) as candles,patch('bot.snapshot',return_value=b'png') as snapshot,patch('bot.photo'),patch('bot.send') as send:
+            bot.chart_for_chat(1,'XAUUSD','1h')
+            candles.assert_called_once()
+            self.assertEqual(len(snapshot.call_args.kwargs['annotations']['drawings']),3)
+            self.assertIn('TP1:',send.call_args.args[1])
+            self.assertIsNone(state['pending'])
+
     def test_reference_rr_is_not_uniform(self):
         self.assertAlmostEqual(engine.reward_risk(4179.4,4147.5,4195),.489028,places=5)
         self.assertAlmostEqual(engine.reward_risk(4179.4,4147.5,4219.42),1.254545,places=5)
@@ -30,7 +57,7 @@ class DetailedAnalysis(unittest.TestCase):
         self.assertEqual(engine.ema_series([1,2,3,4],3),[None,None,2,3])
     def test_long_short_math_and_length(self):
         for direction in (1,-1):
-            a,i,d,score,setup=engine.market_setup(bars(direction),'SMC')
+            a,i,d,score,setup=engine.market_setup(bars(direction),'Price Action')
             self.assertEqual(d,direction)
             self.assertIsNotNone(setup)
             for n,t in enumerate(setup['targets'],1):
@@ -43,7 +70,7 @@ class DetailedAnalysis(unittest.TestCase):
     def test_detailed_delivery_uses_no_ai_or_chart(self):
         state=dict(selection={},history=[],preferences={})
         with patch('bot.session',return_value=state),patch('bot.candles',return_value=bars()),patch('bot.route') as ai,patch('bot.photo') as photo,patch('bot.send') as send,patch('features.feedback_buttons',return_value=[]):
-            bot.analyze_for_chat(1,'XAUUSD','1h','SMC','Gold full analysis')
+            bot.analyze_for_chat(1,'XAUUSD','1h','Price Action','Gold full analysis')
             ai.assert_not_called();photo.assert_not_called()
             self.assertIn('TP1:',send.call_args.args[1])
     def test_missing_data_withholds_plan(self):

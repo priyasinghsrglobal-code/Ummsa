@@ -68,15 +68,16 @@ def route(text,history,selection,facts=None):
 
 
 chart_cache={};chart_calls=[]
-def snapshot(symbol,tf):
+def snapshot(symbol,tf,annotations=None):
     if not CHART_KEY: raise DataError('TradingView image service configured nahi hai.')
-    now=time.time(); k=(symbol,tf)
+    now=time.time(); k=(symbol,tf,json.dumps(annotations,sort_keys=True))
     if k in chart_cache and now-chart_cache[k][0]<60:return chart_cache[k][1]
     chart_calls[:]=[t for t in chart_calls if now-t<60]
     if len(chart_calls)>=3:raise DataError('Chart service busy hai. Ek minute baad try karo.')
     chart_calls.append(now)
     features.event('chart_request')
     body={'symbol':TV[symbol],'interval':tf,'width':800,'height':600,'theme':'dark','style':'candle'}
+    if annotations:body.update(annotations)
     try:
         req=Request('https://api.chart-img.com/v2/tradingview/advanced-chart',data=json.dumps(body).encode(),headers={'Content-Type':'application/json','x-api-key':CHART_KEY})
         with urlopen(req,timeout=35) as r: raw=r.read(5000001)
@@ -85,5 +86,6 @@ def snapshot(symbol,tf):
         return raw
     except Exception:
         raise DataError('TradingView chart image nahi aa paayi—service access ya quota issue ho sakta hai. Koi substitute image nahi bheji gayi.') from None
+
 
 

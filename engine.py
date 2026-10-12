@@ -129,7 +129,8 @@ def market_setup(bars,method):
     # A deliberately conditional breakout/retest template, not a market order.
     # Targets are explicit R-multiple projections, never labelled observed resistance.
     setup=None
-    if direction and i['atr']>0:
+    smc_confirmation=any(('Sell-side sweep' in f or 'bullish structure break' in f or 'bullish FVG' in f) if direction==1 else ('Buy-side sweep' in f or 'bearish structure break' in f or 'bearish FVG' in f) for f in a['facts'])
+    if direction and i['atr']>0 and (method!='SMC' or smc_confirmation):
         level=a['resistance'] if direction==1 else a['support']
         entry=level
         stop=(a['support']-0.1*i['atr']) if direction==1 else (a['resistance']+0.1*i['atr'])
@@ -184,3 +185,44 @@ def detailed_report(bars,symbol,tf,method):
               '',f'🕐 Candle closed: {stamp}',f'Data: Twelve Data | {len(bars)} closed candles | retrieved {datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")}',
               'Educational scenario, not personalised advice. Feed may differ from MT5/TradingView. Spreads and slippage excluded.']
     return '\n'.join(lines)
+
+
+def compact_report(bars,symbol,tf,method):
+    a,i,direction,score,setup=market_setup(bars,method)
+    digits=3 if 'JPY' in symbol or symbol=='XAGUSD' else 2 if symbol in ('XAUUSD','BTCUSD','ETHUSD') else 5
+    p=lambda v:f'{v:,.{digits}f}'
+    side='BUY' if direction==1 else 'SELL' if direction==-1 else 'NEUTRAL'
+    lines=[f'📊 {symbol} | {tf} | {method}',f'{"🟢" if direction==1 else "🔴" if direction==-1 else "🟡"} {side} BIAS | WAIT for confirmation']
+    if setup:
+        above='above' if direction==1 else 'below'
+        lines += [f'📍 Entry: {p(setup["entry"])} — {tf} close {above}, then retest holds.',
+                  f'🛑 SL: {p(setup["stop"])}',
+                  '🎯 '+ ' | '.join(f'TP{n}: {p(t)} ({reward_risk(setup["entry"],setup["stop"],t):.1f}R)' for n,t in enumerate(setup['targets'],1)),
+                  f'❌ Cancel if price closes back {"below" if direction==1 else "above"} {p(setup["entry"])} after breakout.']
+    else:lines += ['No confirmed strategy setup; entry/SL/targets withheld.']
+    lines += [f'Why: price {"above" if bars[-1]["c"]>i["ema50"] else "below" if bars[-1]["c"]<i["ema50"] else "at"} EMA50, RSI {i["rsi"]:.0f}, MACD {"positive" if i["histogram"]>0 else "negative" if i["histogram"]<0 else "flat"}.',
+              f'Support {p(a["support"])} | Resistance {p(a["resistance"])}']
+    if a['trend'].startswith('Range'):lines.append('⚠️ Range structure: breakout confirmation is essential.')
+    stamp=datetime.fromtimestamp(bars[-1]['t']+TIMEFRAMES[tf][1],timezone.utc).strftime('%d %b %Y %H:%M UTC')
+    lines += [f'🕐 {stamp} | Twelve Data', 'Targets are R-based projections. Educational only; costs excluded.']
+    return '\n'.join(lines)
+
+
+def chart_annotations(bars,symbol,tf,method):
+    """Three provider-native drawings: risk box (entry/SL/TP3), TP1, TP2."""
+    a,i,direction,score,setup=market_setup(bars,method)
+    def line(value,label,color):
+        return {'name':'Horizontal Line','input':{'price':value,'text':label},'override':{'lineColor':color,'textColor':color,'fontSize':12,'horzLabelAlign':'left'}}
+    if setup:
+        start=datetime.fromtimestamp(bars[-8]['t'],timezone.utc).isoformat()
+        end=datetime.fromtimestamp(bars[-1]['t']+TIMEFRAMES[tf][1]*8,timezone.utc).isoformat()
+        drawings=[{'name':'Long Position' if direction==1 else 'Short Position','input':{'startDatetime':start,'endDatetime':end,'entryPrice':setup['entry'],'stopPrice':setup['stop'],'targetPrice':setup['targets'][2]},'override':{'showPrice':True,'showStats':False}}]
+        drawings += [line(t,f'TP{n} projected / WAIT', 'rgb(34,197,94)') for n,t in enumerate(setup['targets'][:2],1)]
+        extent=[setup['stop'],setup['entry'],*setup['targets']]
+    else:
+        drawings=[line(a['support'],'Support / WAIT','rgb(34,197,94)'),line(a['resistance'],'Resistance / WAIT','rgb(239,68,68)')]
+        extent=[a['support'],a['resistance']]
+    extent += [b[k] for b in bars[-60:] for k in ('h','l')]
+    lo,hi=min(extent),max(extent);padding=max((hi-lo)*.06,hi*.0001)
+    return {'drawings':drawings,'override':{'priceRange':{'from':max(.000001,lo-padding),'to':hi+padding}},
+            'range':{'from':datetime.fromtimestamp(bars[-60]['t'],timezone.utc).isoformat(),'to':datetime.fromtimestamp(bars[-1]['t']+TIMEFRAMES[tf][1]*10,timezone.utc).isoformat()}}
