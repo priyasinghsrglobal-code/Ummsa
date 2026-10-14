@@ -67,10 +67,22 @@ def session(chat):
     sessions[chat]['updated']=now
     return sessions[chat]
 
+def chart_veto(text):
+    t=text.lower().replace("’", "'")
+    return bool(re.search(r"\b(no|not|without|nahi|nhi|nahin|mat|don't|dont)\b|नहीं|मत",t) or
+                re.search(r"\b(what is|what are|meaning|kya hai|kya hota|kaise padh|how to read|how do .*read)\b",t))
+
 def wants_chart(text):
-    t=text.lower()
-    if re.search(r"\b(no|not|without|nahi|nhi|mat|don't|dont)\b|नहीं|मत",t):return False
-    return bool(re.search(r'\b(chart|graph|snapshot|image|photo)\b|चार्ट',t) and (re.search(r'\b(show|send|display|dikhao|dikha|bhejo|bhej|do|please|pls|chahiye)\b|दिखाओ|भेजो',t) or re.fullmatch(r'(?:gold |silver |[A-Z]{6} )?(?:chart|graph)(?: \d+[mh])?',text,re.I)))
+    # Common transliterations/typos work without an AI request. Unusual wording
+    # is handled by the semantic router, subject to the same veto.
+    t=text.lower().strip()
+    if chart_veto(t):return False
+    noun=r"\b(charts?|chrt|chrat|chatrt|graph|graf|snapshot|screenshot|image|photo|picture|pic|tasveer|tradingview)\b|चार्ट|ग्राफ|तस्वीर"
+    request=r"\b(show|send|display|share|draw|plot|see|look|view|want|need|dikha\w*|dekha\w*|dikh\w*|dekhna|bhej\w*|batao|do|dena|de|please|pls|plz|chahi\w*|chaiye|milega|sakta|sakte|sakti)\b|दिखा|भेज|चाहिए"
+    if not re.search(noun,t):return False
+    if re.search(request,t):return True
+    return bool(re.fullmatch(r"(?:gold|silver|bitcoin|ethereum|[a-z]{6}|\d+[mh]|ka|ki|ke|chart|charts|chrt|chrat|graph|graf|tradingview|\s|[?!.,])+",t))
+
 
 def remember(state,text,reply):
     state['history'].extend([{'role':'user','text':text[:3000]},{'role':'assistant','text':reply[:1500]}])
@@ -126,7 +138,7 @@ def direct_market(text,state):
     requested_tf=re.search(r'\b(\d+(?:m|h|d|w))\b',t)
     if (requested_tf and requested_tf[1] not in TIMEFRAMES) or (pending and re.fullmatch(r'\d+',t)):
         return ('ask','Yeh timeframe supported nahi hai. 5m, 15m, 30m, 1h ya 4h choose karein.')
-    if re.search(r'\b(what is|kya hai|meaning|samjhao|explain)\b',t):return None
+    if not chart and re.search(r'\b(what is|kya hai|meaning|samjhao|explain)\b',t):return None
     sel=state['selection']
     if sym and sym!=sel.get('symbol'):sel.clear()
     if sym:sel['symbol']=sym
@@ -178,7 +190,16 @@ def analyze_for_chat(chat,symbol,tf,method,question=None):
             return
         facts=report(bars,symbol,tf,method)
         try:
-            reply=route(question or 'Give a short current analysis: trend, key levels and conditional scenarios with invalidation.',state['history'],{**state['selection'],'preferences':state.get('preferences',{})},facts=facts)['reply'][:1500]
+            simple=(question or '').lower()
+            from engine import analyze
+            if re.search(r'\b(price|rate|kitne|kitna|levels?|support|resistance|trend)\b',simple) and not re.search(r'\b(why|kyu|kyun|explain|reason|kaise)\b',simple):
+                a=analyze(bars,method)
+                digits=3 if 'JPY' in symbol or symbol=='XAGUSD' else (2 if symbol in ('XAUUSD','BTCUSD','ETHUSD') else 5)
+                reply=f"{symbol} {tf} • Last closed price: {bars[-1]['c']:.{digits}f} (live quote nahi)."
+                if re.search(r'\b(trend|levels?|support|resistance)\b',simple):
+                    reply+=f"\n{a['trend']} • Support {a['support']:.{digits}f} | Resistance {a['resistance']:.{digits}f}"
+            else:
+                reply=route(question or 'Give a short current analysis: trend, key levels and conditional scenarios with invalidation.',state['history'],{**state['selection'],'preferences':state.get('preferences',{})},facts=facts)['reply'][:1500]
         except DataError:
             from engine import analyze
             a=analyze(bars,method)
@@ -258,14 +279,15 @@ def handle_inner(update):
                 state['selection']={}
             for key in ('symbol','timeframe','method'):
                 if answer.get(key):state['selection'][key]=answer[key]
-            if answer['action'] in ('analyze','chart') or wants_chart(text):
+            chart_request=wants_chart(text) or (answer['action']=='chart' and not chart_veto(text))
+            if answer['action']=='analyze' or chart_request:
                 sel=state['selection']
-                state['pending']={'action':'chart' if wants_chart(text) else 'analyze','question':text}
+                state['pending']={'action':'chart' if chart_request else 'analyze','question':text}
                 if not sel.get('symbol'):reply='Kaunsa symbol dekhna hai—Gold, EURUSD ya koi aur?'
                 elif not sel.get('timeframe'):reply='Kaunsa timeframe dekhein—5m, 15m, 30m, 1h ya 4h?'
                 else:
                     state['pending']=None
-                    if wants_chart(text):
+                    if chart_request:
                         chart_for_chat(chat,sel['symbol'],sel['timeframe'])
                     else:
                         analyze_for_chat(chat,sel['symbol'],sel['timeframe'],sel.get('method','Price Action'),question=text)
@@ -414,6 +436,7 @@ if __name__=='__main__':
     try:raise SystemExit(main())
     except Exception:
         log.error('Startup failed; check credentials and service connectivity');raise SystemExit(1)
+
 
 
 

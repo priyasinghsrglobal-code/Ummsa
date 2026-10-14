@@ -7,6 +7,7 @@ from engine import DataError
 class ReliabilityTests(unittest.TestCase):
     def setUp(self):
         mentor.calls.clear()
+        mentor._ai_pause_until=0
         self.event=patch('mentor.features.event').start()
         patch('mentor.time.sleep').start()
         self.addCleanup(patch.stopall)
@@ -32,6 +33,7 @@ class ReliabilityTests(unittest.TestCase):
     def test_quota_and_auth_are_not_retried(self):
         for code in (429,401,403):
             mentor.calls.clear()
+            mentor._ai_pause_until=0
             with patch('mentor.urlopen',side_effect=self.error(code)) as call:
                 with self.assertRaises(DataError):mentor._ai_request(object())
                 self.assertEqual(call.call_count,1)
@@ -52,3 +54,4 @@ class ReliabilityTests(unittest.TestCase):
             self.assertNotIn('/sr',reply)
 
 if __name__=='__main__':unittest.main()
+
