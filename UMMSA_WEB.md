@@ -4,7 +4,7 @@ This service is separate from `python bot.py`. The existing bot files and its de
 
 ## Deploy
 
-Use `Dockerfile.web` and `railway.web.json`, one replica, one Gunicorn worker with threads. Mount a separate persistent volume at `/data`. Set `UMMSA_DB=/data/ummsa.sqlite3`, `OWNER_SETUP_TOKEN` to a long random secret, `TWELVE_DATA_API_KEY`, and optionally `GEMINI_API_KEY`, `GEMINI_MODEL`, `VAPID_SUBJECT=mailto:<owner email>`. Secure cookies are enabled by default. For local HTTP testing only set `COOKIE_SECURE=false`.
+Configure the service directly with `Dockerfile.web`, its Gunicorn start command and `/health`, one replica, one Gunicorn worker with threads. Railway rejected custom Config as Code for this new service; `railway.web.json` is a legacy reference only and is not used by the deployed service. Mount a separate persistent volume at `/data`. Set `UMMSA_DB=/data/ummsa.sqlite3`, `OWNER_SETUP_TOKEN` to a long random secret, `TWELVE_DATA_API_KEY`, and optionally `GEMINI_API_KEY`, `GEMINI_MODEL`, `VAPID_SUBJECT=mailto:<owner email>`. Secure cookies are enabled by default. For local HTTP testing only set `COOKIE_SECURE=false`.
 
 Open the website and use Sign in → Activate workspace. Enter the one-time owner activation code and choose an email/password. After the owner exists, bootstrap is disabled by a database check. Remove the activation variable after setup. Passwords are hashed; opaque sessions are stored hashed and expire in 24 hours. Email verification and self-service password reset are not yet integrated; owner-approved beta only.
 

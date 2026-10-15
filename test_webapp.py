@@ -95,10 +95,31 @@ class ApiTests(unittest.TestCase):
         self.assertEqual(self.owner.get('/api/history').json['signals'][0]['status'],'Awaiting confirmation')
     def test_scan_settings_validation(self):
         self.assertEqual(self.owner.post('/api/admin/scanner',json={'enabled':True,'symbols':['FAKE'],'tf':'15m'}).status_code,400)
+    def test_push_retry_and_success(self):
+        uid=self.owner.get('/api/me').json['user']['id']
+        self.owner.post('/api/preferences',json={'watchlist':['XAUUSD'],'alerts':True})
+        endpoint='https://fcm.googleapis.com/test-only'
+        with webapp.db() as c:
+            c.execute('INSERT INTO subscriptions VALUES (?,?,?)',(endpoint,uid,json.dumps({'endpoint':endpoint})))
+            c.execute('INSERT INTO delivery VALUES (?,?,?,?,?,?,?,?)',('retry-test',uid,endpoint,'{}','pending',0,0,None))
+        with patch('pywebpush.webpush',side_effect=RuntimeError('test failure')):
+            webapp.deliver_push()
+        with webapp.db() as c:
+            row=c.execute("SELECT * FROM delivery WHERE id='retry-test'").fetchone()
+            self.assertEqual(row['status'],'pending');self.assertEqual(row['attempts'],1)
+            self.assertGreater(row['next_try'],time.time())
+            c.execute("UPDATE delivery SET next_try=0 WHERE id='retry-test'")
+        with patch('pywebpush.webpush') as send:
+            webapp.deliver_push()
+            send.assert_called_once()
+            self.assertIsNotNone(send.call_args.kwargs['vapid_private_key'].private_key)
+        with webapp.db() as c:
+            self.assertEqual(c.execute("SELECT status FROM delivery WHERE id='retry-test'").fetchone()[0],'sent')
     def test_security_headers(self):
         r=self.client.get('/')
         self.assertEqual(r.status_code,200)
         self.assertIn('frame-ancestors',r.headers['Content-Security-Policy'])
         self.assertEqual(r.headers['X-Content-Type-Options'],'nosniff')
+        r.close()
 
 if __name__=='__main__':unittest.main()
