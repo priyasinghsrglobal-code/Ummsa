@@ -1,0 +1,2 @@
+self.addEventListener('push',event=>{let data={title:'Ummsa',body:'Your market workspace has an update.'};try{data=event.data.json()}catch{}event.waitUntil(self.registration.showNotification(data.title,{body:data.body,tag:data.signal_id||'ummsa-update',data:{url:'/'}}))});
+self.addEventListener('notificationclick',event=>{event.notification.close();event.waitUntil(clients.matchAll({type:'window',includeUncontrolled:true}).then(list=>{if(list.length)return list[0].focus();return clients.openWindow('/')}))});
