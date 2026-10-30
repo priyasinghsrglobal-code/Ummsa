@@ -47,6 +47,27 @@ class SignalTests(unittest.TestCase):
         self.assertIn(('XAUUSD','15m','direction'),sig.tasks())
         sig.configure_group(-100123456,'XAUUSD','15m','direction',False)
         self.assertEqual(sig.group_config(-100123456)['enabled'],0)
+    def test_three_market_channel_migration_and_disable(self):
+        gid=-10065432109
+        sig.configure_group(gid,'XAUUSD','15m','direction',True)
+        with features.connect() as db:
+            sig.setup_db(db)
+            db.execute('DELETE FROM signal_group_trio_seed WHERE group_id=?',(gid,))
+            db.execute('DELETE FROM signal_group_extra WHERE group_id=?',(gid,))
+        self.assertGreaterEqual(sig.seed_gold_silver_bitcoin_channels(),1)
+        self.assertEqual({x['symbol'] for x in sig.channel_markets(gid,True)}, {'XAUUSD','XAGUSD','BTCUSD'})
+        self.assertEqual(sig.seed_gold_silver_bitcoin_channels(),0)
+        self.assertIn(('XAGUSD','15m','direction'),sig.tasks())
+        self.assertIn(('BTCUSD','15m','direction'),sig.tasks())
+        sig.disable_group_markets(gid)
+        self.assertEqual(sig.channel_markets(gid,True),[])
+    def test_extra_market_can_be_removed_without_affecting_gold(self):
+        gid=-10065432110
+        sig.configure_group(gid,'XAUUSD','15m','direction',True)
+        self.assertTrue(sig.add_group_market(gid,'XAGUSD','15m','direction'))
+        self.assertFalse(sig.add_group_market(gid,'XAGUSD','15m','direction'))
+        self.assertTrue(sig.remove_group_market(gid,'XAGUSD','15m','direction'))
+        self.assertEqual([r['symbol'] for r in sig.channel_markets(gid,True)],['XAUUSD'])
     def test_group_admin_restriction(self):
         from unittest.mock import patch
         message={'message':{'from':{'id':77},'chat':{'id':-10012345,'type':'supergroup'},'text':'/group_on XAUUSD 15m'}}
