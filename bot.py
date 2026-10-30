@@ -27,16 +27,17 @@ def telegram(method,**params):
     if not result.get('ok'): raise DataError('Telegram request failed.')
     return result.get('result')
 
-def send(chat,text,buttons=None):
+def send(chat,text,buttons=None,reply_to=None):
     args=dict(chat_id=chat,text=text)
     if buttons:args['reply_markup']={'inline_keyboard':buttons}
+    if reply_to:args['reply_parameters']={'message_id':reply_to,'allow_sending_without_reply':True}
     return telegram('sendMessage',**args)
 
 def buttons(items):
     cells=[{'text':label,'callback_data':data} for label,data in items]
     return [cells[i:i+2] for i in range(0,len(cells),2)]
 
-def photo(chat,png):
+def photo(chat,png,reply_to=None):
     boundary='SRMarketViewUploadBoundary'
     body=(f'--{boundary}\r\nContent-Disposition: form-data; name="chat_id"\r\n\r\n{chat}\r\n--{boundary}\r\nContent-Disposition: form-data; name="photo"; filename="chart.png"\r\nContent-Type: image/png\r\n\r\n').encode()+png+f'\r\n--{boundary}--\r\n'.encode()
     result=request(f'https://api.telegram.org/bot{TOKEN}/sendPhoto',body,{'Content-Type':f'multipart/form-data; boundary={boundary}'})
@@ -222,21 +223,25 @@ def analyze_for_chat(chat,symbol,tf,method,question=None):
 def signal_menu(chat):
     send(chat,'📊 Select your symbol',buttons([(k,'us:'+k) for k in SYMBOLS]))
 
-def signal_now(chat,symbol,tf,strategy='direction'):
+def signal_now(chat,symbol,tf,strategy='direction',reply_to=None):
     if symbol not in SYMBOLS or tf not in TIMEFRAMES or strategy not in signals.STRATEGIES:
-        send(chat,'Use /signal XAUUSD 15m direction|breakout|supply');return
+        send(chat,'Unsupported selection. /start',reply_to=reply_to);return
     if strategy=='supply' and (symbol,tf)!=('XAUUSD','15m'):
-        send(chat,'Supply & Demand is Gold 15m only.');return
-    try:bars=candles(symbol,tf)
-    except DataError as exc:
-        send(chat,'Live candles unavailable: '+str(exc)+' No signal generated.');return
-    result=signals.calculate(bars,symbol,tf,strategy)
-    send(chat,signals.format_signal(result,symbol,tf,strategy,bars[-1]['t']+TIMEFRAMES[tf][1]),buttons([('🔄 New analysis','again')]))
-    if result['side'] in ('BUY','SELL') and result.get('entry'):
-        try:
-            from chart import signal_render
-            photo(chat,signal_render(bars,symbol,tf,result))
-        except Exception:log.warning('Ummsa signal chart unavailable; text signal delivered')
+        send(chat,'Supply & Demand supports Gold 15m only.',reply_to=reply_to);return
+    try:
+        bars=candles(symbol,tf)
+        result=signals.calculate(bars,symbol,tf,strategy)
+        analysis=signals.format_analysis(result,bars,symbol,tf,strategy)
+    except (DataError,ValueError) as exc:
+        send(chat,'Live analysis unavailable: '+str(exc)+' No trade signal issued.',reply_to=reply_to);return
+    send(chat,analysis,buttons=[ [{'text':'🔄 New analysis','callback_data':'again'}] ],reply_to=reply_to)
+    try:
+        from chart import signal_render
+        photo(chat,signal_render(bars,symbol,tf,result))
+    except Exception:
+        log.warning('Chart unavailable after text analysis; retry on next request')
+        send(chat,'Chart image unavailable right now. Price analysis above remains valid.')
+
 
 def signal_command(chat,text):
     parts=text.split();cmd=parts[0].split('@')[0].lower() if parts else ''
@@ -279,7 +284,8 @@ def handle_inner(update):
             return
         if len(parts)==3 and parts[0]=='ut' and parts[1] in SYMBOLS and parts[2] in TIMEFRAMES:
             symbol,tf=parts[1:]
-            signal_now(chat,symbol,tf,'direction')
+            send(chat,f'✅ Selected: {symbol} · {tf.upper()}\nAnalyzing latest closed candles…',reply_to=m.get('message_id'))
+            signal_now(chat,symbol,tf,'direction',reply_to=m.get('message_id'))
             return
         if data=='again':
             signal_menu(chat)
