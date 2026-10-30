@@ -18,7 +18,7 @@ class SignalTests(unittest.TestCase):
         with self.assertRaises(ValueError):sig.configure(3,'EURUSD','5m','supply',True)
     def test_neutral_no_levels(self):
         result={'side':'NEUTRAL'}
-        self.assertIn('No confirmed BUY/SELL',sig.format_signal(result,'XAUUSD','15m','direction',900))
+        self.assertIn('No confirmed setup',sig.format_signal(result,'XAUUSD','15m','direction',900))
     def test_first_scan_no_alert_then_once(self):
         bars=[dict(t=n*900,o=2400,h=2401,l=2399,c=2400) for n in range(90)]
         sig.configure(87,'XAUUSD','15m','direction',True)
@@ -30,11 +30,11 @@ class SignalTests(unittest.TestCase):
         with patch.object(features,'allowed',return_value=True),patch.object(sig,'calculate',return_value={'side':'BUY','entry':2409.,'stop':2390.,'targets':[2428.,2447.,2466.]}):
             self.assertEqual(sig.once('XAUUSD','15m','direction',future,lambda uid,msg:sent.append(msg)),'SIGNAL')
             self.assertEqual(sig.once('XAUUSD','15m','direction',future,lambda uid,msg:sent.append(msg)),'UNCHANGED')
-        self.assertEqual(len(sent),1);self.assertIn('🎯 T2:',sent[0])
+        self.assertEqual(len(sent),1);self.assertIn('T2 ',sent[0])
     def test_message_format_has_newlines(self):
         msg=sig.format_signal({'side':'BUY','entry':4033.,'stop':4028.,'targets':[4038.,4043.,4048.]},'XAUUSD','15m','direction',900)
-        self.assertIn('🟢 BUY setup\n',msg)
-        self.assertIn('🎯 T1: 4038.00\n',msg)
+        self.assertIn('🟢 XAUUSD · M15 · BUY\n',msg)
+        self.assertIn('T1 4038.00',msg)
         self.assertNotIn('\\\\n',msg)
     def test_neutral_chart_png(self):
         from chart import signal_render
@@ -47,6 +47,18 @@ class SignalTests(unittest.TestCase):
         self.assertIn(('XAUUSD','15m','direction'),sig.tasks())
         sig.configure_group(-100123456,'XAUUSD','15m','direction',False)
         self.assertEqual(sig.group_config(-100123456)['enabled'],0)
+    def test_gold_breakout_channel_auto_enable(self):
+        gid=-10065432888
+        sig.configure_group(gid,'XAUUSD','15m','direction',True)
+        with features.connect() as db:
+            sig.setup_db(db)
+            db.execute('DELETE FROM signal_group_breakout_seed WHERE group_id=?',(gid,))
+            db.execute('DELETE FROM signal_group_extra WHERE group_id=?',(gid,))
+        self.assertGreaterEqual(sig.seed_gold_breakout_channels(),1)
+        rows=sig.channel_markets(gid,True)
+        self.assertTrue(any(r['symbol']=='XAUUSD' and r['strategy']=='breakout' for r in rows))
+        self.assertEqual(sig.seed_gold_breakout_channels(),0)
+
     def test_three_market_channel_migration_and_disable(self):
         gid=-10065432109
         sig.configure_group(gid,'XAUUSD','15m','direction',True)
