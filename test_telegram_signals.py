@@ -31,6 +31,16 @@ class SignalTests(unittest.TestCase):
             self.assertEqual(sig.once('XAUUSD','15m','direction',future,lambda uid,msg:sent.append(msg)),'SIGNAL')
             self.assertEqual(sig.once('XAUUSD','15m','direction',future,lambda uid,msg:sent.append(msg)),'UNCHANGED')
         self.assertEqual(len(sent),1);self.assertIn('TP3:',sent[0])
+    def test_message_format_has_newlines(self):
+        msg=sig.format_signal({'side':'BUY','entry':4033.,'stop':4028.,'targets':[4038.,4043.,4048.]},'XAUUSD','15m','direction',900)
+        self.assertIn('🟢 BUY setup\\n',msg)
+        self.assertIn('🎯 T1: 4038.00\\n',msg)
+        self.assertNotIn('\\\\n',msg)
+    def test_neutral_chart_png(self):
+        from chart import signal_render
+        bars=[dict(t=n*900,o=2400,h=2401,l=2399,c=2400) for n in range(90)]
+        png=signal_render(bars,'XAUUSD','15m',{'side':'NEUTRAL'})
+        self.assertEqual(png[:4],bytes([137,80,78,71]))
     def test_chart_png(self):
         from chart import signal_render
         bars=[dict(t=n*900,o=2400,h=2401,l=2399,c=2400) for n in range(90)]
