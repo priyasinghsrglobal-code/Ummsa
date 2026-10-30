@@ -8,6 +8,7 @@ from mentor import route, snapshot, TV
 import features
 import telegram_signals as signals
 import channel_content
+import channel_content
 
 log=logging.getLogger('sr');logging.basicConfig(level=logging.INFO,format='%(levelname)s %(message)s')
 TOKEN=os.environ.get('TELEGRAM_BOT_TOKEN',''); KEY=os.environ.get('TWELVE_DATA_API_KEY','')
@@ -328,7 +329,7 @@ def channel_command(update):
         return
     parts=(m.get('text') or '').strip().split()
     cmd=parts[0].split('@')[0].lower() if parts else ''
-    if cmd not in ('/channel_test','/channel_on','/channel_off','/channel_status','/channel_help'):
+    if cmd not in ('/channel_test','/channel_on','/channel_off','/channel_status','/channel_help','/news_on','/news_off','/engage_on','/engage_off'):
         return
     log.info('Channel command received: %s',cmd)
     # A channel_post is authored through the channel's publishing rights.
@@ -341,6 +342,11 @@ def channel_command(update):
             return
     except (DataError,KeyError,TypeError):
         log.warning('Channel administrative permission verification failed')
+        return
+    if cmd in ('/news_on','/news_off','/engage_on','/engage_off'):
+        if cmd.startswith('/news'):channel_content.set_settings(channel,news=(cmd=='/news_on'))
+        else:channel_content.set_settings(channel,engagement=(cmd=='/engage_on'))
+        send(channel,'✅ Channel content setting updated: '+cmd)
         return
     if cmd=='/channel_test':
         send(channel,'✅ Channel delivery working. Test message only — no trading signal.')
@@ -369,6 +375,7 @@ def channel_command(update):
     strategy=parts[3].lower() if len(parts)==4 else 'direction'
     try:
         signals.configure_group(channel,symbol,tf,strategy,True)
+        channel_content.set_settings(channel,news=True,engagement=True)
     except ValueError as exc:
         send(channel,str(exc))
         return
@@ -542,6 +549,10 @@ def main():
             updates=telegram('getUpdates',offset=offset,timeout=25,allowed_updates=['message','callback_query','channel_post'])
             last_poll=time.time()
             deliver_reminders()
+            if time.time()>=next_content_scan:
+                next_content_scan=time.time()+1800
+                try:channel_content.tick(telegram,signals)
+                except Exception:log.warning('News/engagement scan unavailable; signals unaffected')
             if time.time()>=next_content_scan:
                 next_content_scan=time.time()+1800
                 try:channel_content.tick(telegram,signals)
