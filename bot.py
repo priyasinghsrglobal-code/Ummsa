@@ -27,9 +27,10 @@ def telegram(method,**params):
     if not result.get('ok'): raise DataError('Telegram request failed.')
     return result.get('result')
 
-def send(chat,text,buttons=None,reply_to=None):
+def send(chat,text,buttons=None,reply_to=None,keyboard=None):
     args=dict(chat_id=chat,text=text)
-    if buttons:args['reply_markup']={'inline_keyboard':buttons}
+    if keyboard:args['reply_markup']={'keyboard':[[{'text':v} for v in row] for row in keyboard], 'resize_keyboard':True,'one_time_keyboard':True}
+    elif buttons:args['reply_markup']={'inline_keyboard':buttons}
     if reply_to:args['reply_parameters']={'message_id':reply_to,'allow_sending_without_reply':True}
     return telegram('sendMessage',**args)
 
@@ -221,27 +222,34 @@ def analyze_for_chat(chat,symbol,tf,method,question=None):
         send(chat,reply);log.warning('Market data unavailable; analysis withheld')
 
 def signal_menu(chat):
-    send(chat,'📊 Select your symbol',buttons([(k,'us:'+k) for k in SYMBOLS]))
+    state=session(chat)
+    state['selection']={}
+    state['pending']='symbol'
+    send(chat,'📊 Select symbol',keyboard=[list(SYMBOLS)[i:i+2] for i in range(0,len(SYMBOLS),2)])
 
-def signal_now(chat,symbol,tf,strategy='direction',reply_to=None):
+def signal_now(chat,symbol,tf,strategy='direction'):
     if symbol not in SYMBOLS or tf not in TIMEFRAMES or strategy not in signals.STRATEGIES:
-        send(chat,'Unsupported selection. /start',reply_to=reply_to);return
-    if strategy=='supply' and (symbol,tf)!=('XAUUSD','15m'):
-        send(chat,'Supply & Demand supports Gold 15m only.',reply_to=reply_to);return
+        send(chat,'Unsupported market or timeframe. /start');return
     try:
         bars=candles(symbol,tf)
         result=signals.calculate(bars,symbol,tf,strategy)
-        analysis=signals.format_analysis(result,bars,symbol,tf,strategy)
+        analysis=signals.format_brief(result,bars,symbol,tf,strategy)
     except (DataError,ValueError) as exc:
-        send(chat,'Live analysis unavailable: '+str(exc)+' No trade signal issued.',reply_to=reply_to);return
-    send(chat,analysis,buttons=[ [{'text':'🔄 New analysis','callback_data':'again'}] ],reply_to=reply_to)
+        send(chat,'Live candles unavailable: '+str(exc)+' No signal generated.');return
+    send(chat,analysis)
     try:
+        from mentor import snapshot
         from chart import signal_render
-        photo(chat,signal_render(bars,symbol,tf,result))
+        # TradingView actual chart with the same calculated entry/SL/TP levels.
+        image=snapshot(symbol,tf,annotations=signals.tradingview_annotations(bars,symbol,tf,result))
+        photo(chat,image)
+    except DataError as exc:
+        log.warning('TradingView image unavailable: %s',exc)
+        try:photo(chat,signal_render(bars,symbol,tf,result))
+        except Exception:send(chat,'Chart service temporarily unavailable. Analysis above uses verified closed candles.')
     except Exception:
-        log.warning('Chart unavailable after text analysis; retry on next request')
-        send(chat,'Chart image unavailable right now. Price analysis above remains valid.')
-
+        log.warning('Chart delivery failed')
+        send(chat,'Chart image temporarily unavailable. Analysis above uses verified closed candles.')
 
 def signal_command(chat,text):
     parts=text.split();cmd=parts[0].split('@')[0].lower() if parts else ''
@@ -270,28 +278,14 @@ def signal_command(chat,text):
     return False
 
 def handle_inner(update):
-    """Signal-only menu. No generative conversation or legacy FAQ routes."""
+    """Reply keyboard sends actual Telegram user messages for symbol and timeframe."""
     q=update.get('callback_query')
     m=q.get('message',{}) if q else update.get('message',{})
     chat=m.get('chat',{}).get('id')
     if not chat or m.get('chat',{}).get('type')!='private':return
     if q:
         telegram('answerCallbackQuery',callback_query_id=q['id'])
-        data=q.get('data','')
-        parts=data.split(':')
-        if len(parts)==2 and parts[0]=='us' and parts[1] in SYMBOLS:
-            send(chat,'Select timeframe',buttons([(tf,f'ut:{parts[1]}:{tf}') for tf in TIMEFRAMES]))
-            return
-        if len(parts)==3 and parts[0]=='ut' and parts[1] in SYMBOLS and parts[2] in TIMEFRAMES:
-            symbol,tf=parts[1:]
-            send(chat,f'✅ Selected: {symbol} · {tf.upper()}\nAnalyzing latest closed candles…',reply_to=m.get('message_id'))
-            signal_now(chat,symbol,tf,'direction',reply_to=m.get('message_id'))
-            return
-        if data=='again':
-            signal_menu(chat)
-            return
-        send(chat,'Choose a market to continue.',buttons([(k,'us:'+k) for k in SYMBOLS]))
-        return
+        signal_menu(chat);return
     raw=m.get('text','').strip()
     cmd=raw.split()[0].split('@')[0].lower() if raw else ''
     if cmd in ('/start','/menu','/signals','/reset'):
@@ -302,14 +296,23 @@ def handle_inner(update):
         return
     if cmd=='/myid':
         send(chat,f'Your Telegram ID: {chat}');return
-    if cmd=='/delete_my_data' and raw=='/delete_my_data confirm':
-        with features.connect() as db:
-            for table in ('users','access','journal','replies','issues','alerts','signal_subscriptions','signal_delivery'):
-                try:db.execute(f'DELETE FROM {table} WHERE '+('id' if table in ('users','access') else 'uid')+'=?',(chat,))
-                except Exception:pass
-        sessions.pop(chat,None)
-        send(chat,'Saved personal settings and history cleared.');return
-    send(chat,'Choose symbol and timeframe to get analysis.',buttons([(k,'us:'+k) for k in SYMBOLS]))
+    state=session(chat)
+    symbol=raw.upper()
+    if symbol in SYMBOLS:
+        state['selection']={'symbol':symbol}
+        state['pending']='timeframe'
+        send(chat,f'{symbol} selected. Choose timeframe.',keyboard=[list(TIMEFRAMES)[i:i+2] for i in range(0,len(TIMEFRAMES),2)])
+        return
+    if raw.lower() in TIMEFRAMES:
+        symbol=state.get('selection',{}).get('symbol')
+        if not symbol:
+            signal_menu(chat);return
+        tf=raw.lower()
+        state['selection']['timeframe']=tf
+        state['pending']=None
+        signal_now(chat,symbol,tf,'direction')
+        return
+    signal_menu(chat)
 
 def handle(update):
     q=update.get('callback_query');m=q.get('message',{}) if q else update.get('message',{})
