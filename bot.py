@@ -6,6 +6,7 @@ from http.server import HTTPServer, BaseHTTPRequestHandler
 from engine import SYMBOLS,TIMEFRAMES,DataError,validate,report,detailed_report,compact_report,chart_annotations
 from mentor import route, snapshot, TV
 import features
+import telegram_signals as signals
 
 log=logging.getLogger('sr');logging.basicConfig(level=logging.INFO,format='%(levelname)s %(message)s')
 TOKEN=os.environ.get('TELEGRAM_BOT_TOKEN',''); KEY=os.environ.get('TWELVE_DATA_API_KEY','')
@@ -43,8 +44,11 @@ def photo(chat,png):
 
 def candles(symbol,tf):
     k=(symbol,tf); now=time.time()
-    if k in cache and now-cache[k][0]<30:
-        return validate(cache[k][1],symbol,tf,now)
+    if k in cache:
+        try:
+            bars=validate(cache[k][1],symbol,tf,now)
+            if now<bars[-1]['t']+2*TIMEFRAMES[tf][1]:return bars
+        except DataError:cache.pop(k,None)
     api_calls[:]=[t for t in api_calls if now-t<60]
     if len(api_calls)>=int(os.getenv('DATA_REQUESTS_PER_MINUTE','6')):
         raise DataError('Market-data capacity reached. Please retry in one minute.')
@@ -215,6 +219,49 @@ def analyze_for_chat(chat,symbol,tf,method,question=None):
         reply='Is symbol ka market data abhi nahi mil raha. Verified candles ke bina analysis nahi de sakta.' if str(exc).startswith('Provider HTTP') else str(exc)
         send(chat,reply);log.warning('Market data unavailable; analysis withheld')
 
+def signal_menu(chat):
+    send(chat,'Ummsa Signals — select your market. /signal XAUUSD 15m direction for instant result. /signals_on XAUUSD 15m direction to subscribe. /signals_off to stop.',buttons([(k,'us:'+k) for k in SYMBOLS]))
+
+def signal_now(chat,symbol,tf,strategy='direction'):
+    if symbol not in SYMBOLS or tf not in TIMEFRAMES or strategy not in signals.STRATEGIES:
+        send(chat,'Use /signal XAUUSD 15m direction|breakout|supply');return
+    if strategy=='supply' and (symbol,tf)!=('XAUUSD','15m'):
+        send(chat,'Supply & Demand is Gold 15m only.');return
+    bars=candles(symbol,tf)
+    result=signals.calculate(bars,symbol,tf,strategy)
+    send(chat,signals.format_signal(result,symbol,tf,strategy,bars[-1]['t']+TIMEFRAMES[tf][1]))
+    if result['side'] in ('BUY','SELL') and result.get('entry'):
+        try:
+            from chart import signal_render
+            photo(chat,signal_render(bars,symbol,tf,result))
+        except Exception:log.warning('Ummsa signal chart unavailable; text signal delivered')
+
+def signal_command(chat,text):
+    parts=text.split();cmd=parts[0].split('@')[0].lower() if parts else ''
+    if cmd=='/signals':
+        signal_menu(chat);return True
+    if cmd=='/signals_off':
+        cfg=signals.config(chat)
+        if cfg:signals.configure(chat,cfg['symbol'],cfg['tf'],cfg['strategy'],False)
+        send(chat,'Automatic signal alerts OFF. /signal still works.');return True
+    if cmd=='/signals_status':
+        cfg=signals.config(chat)
+        send(chat,('Alerts: '+('ON' if cfg['enabled'] else 'OFF')+f" | {cfg['symbol']} {cfg['tf']} {cfg['strategy']}" if cfg else 'No automatic signals configured. /signals'));return True
+    if cmd in ('/signal','/signals_on'):
+        if len(parts) not in (3,4):
+            send(chat,'Use '+cmd+' XAUUSD 15m direction|breakout|supply');return True
+        symbol,tf=parts[1].upper(),parts[2].lower();strategy=parts[3].lower() if len(parts)==4 else 'direction'
+        if symbol not in SYMBOLS or tf not in TIMEFRAMES or strategy not in signals.STRATEGIES:
+            send(chat,'Unsupported market, timeframe or strategy.');return True
+        if strategy=='supply' and (symbol,tf)!=('XAUUSD','15m'):
+            send(chat,'Supply & Demand supports Gold 15m only.');return True
+        if cmd=='/signals_on':
+            signals.configure(chat,symbol,tf,strategy,True)
+            send(chat,f'Alerts ON: {symbol} {tf} {strategy}. Only new BUY/SELL transitions notify you. First scan establishes a baseline. No guaranteed trade fills.')
+        else:signal_now(chat,symbol,tf,strategy)
+        return True
+    return False
+
 def handle_inner(update):
     q=update.get('callback_query');m=q.get('message',{}) if q else update.get('message',{})
     chat=m.get('chat',{}).get('id')
@@ -231,6 +278,7 @@ def handle_inner(update):
                 state['history']=[];state['selection']={};state['preferences']={};state['pending']=None;state['last_failure']=None
             send(chat,features.WELCOME if cmd=='/start' else 'Conversation aur preferences clear ho gaye. Journal aur watchlist retained hain; /delete_my_data se sab erase kar sakte hain.')
             return
+        if signal_command(chat,text):return
         if cmd=='/menu':
             send(chat,'Select symbol',buttons([(v,'s:'+v) for v in SYMBOLS]));return
         if cmd=='/privacy':
@@ -309,6 +357,12 @@ def handle_inner(update):
     if q.get('data','').startswith('fb:'):
         send(chat,features.feedback(chat,q['data']));return
     parts=q.get('data','').split(':')
+    if len(parts)==2 and parts[0]=='us' and parts[1] in SYMBOLS:
+        send(chat,'Choose timeframe',buttons([(tf,f'ut:{parts[1]}:{tf}') for tf in TIMEFRAMES]));return
+    if len(parts)==3 and parts[0]=='ut' and parts[1] in SYMBOLS and parts[2] in TIMEFRAMES:
+        send(chat,'Choose signal strategy',buttons([(name,f'ua:{parts[1]}:{parts[2]}:{name}') for name in signals.STRATEGIES if name!='supply' or (parts[1],parts[2])==('XAUUSD','15m')]));return
+    if len(parts)==4 and parts[0]=='ua' and parts[1] in SYMBOLS and parts[2] in TIMEFRAMES and parts[3] in signals.STRATEGIES:
+        signal_now(chat,*parts[1:]);return
     if len(parts)==2 and parts[0]=='s' and parts[1] in SYMBOLS:
         state['selection']={'symbol':parts[1]}
         send(chat,'Select timeframe',buttons([(tf,f't:{parts[1]}:{tf}') for tf in TIMEFRAMES]));return
@@ -411,12 +465,20 @@ def main():
     if os.getenv('AI_STARTUP_CHECK','true').lower()=='true':
         threading.Thread(target=conversation_probe,daemon=True).start()
     last_poll=time.time()  # Allow rollout healthcheck before old polling worker drains.
-    offset=0;log.info('SR Market View polling started')
+    offset=0;next_signal_scan=0;signal_cursor=0;log.info('SR Market View polling started')
     while running:
         try:
             updates=telegram('getUpdates',offset=offset,timeout=25,allowed_updates=['message','callback_query'])
             last_poll=time.time()
             deliver_reminders()
+            if time.time()>=next_signal_scan:
+                next_signal_scan=time.time()+max(90,int(os.getenv('TELEGRAM_SIGNAL_SCAN_SECONDS','90')))
+                work=signals.tasks()
+                if work:
+                    symbol,tf,strategy=work[signal_cursor%len(work)];signal_cursor+=1
+                    try:signals.once(symbol,tf,strategy,candles(symbol,tf),send)
+                    except DataError as exc:log.warning('Signal scan paused: %s',str(exc))
+                    except Exception:log.warning('Signal scan failed; retry at next interval')
             for update in updates:
                 try:handle(update)
                 except Exception:
