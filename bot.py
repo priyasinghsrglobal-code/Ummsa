@@ -220,16 +220,18 @@ def analyze_for_chat(chat,symbol,tf,method,question=None):
         send(chat,reply);log.warning('Market data unavailable; analysis withheld')
 
 def signal_menu(chat):
-    send(chat,'Ummsa Signals — select your market. /signal XAUUSD 15m direction for instant result. /signals_on XAUUSD 15m direction to subscribe. /signals_off to stop.',buttons([(k,'us:'+k) for k in SYMBOLS]))
+    send(chat,'📊 Select your symbol',buttons([(k,'us:'+k) for k in SYMBOLS]))
 
 def signal_now(chat,symbol,tf,strategy='direction'):
     if symbol not in SYMBOLS or tf not in TIMEFRAMES or strategy not in signals.STRATEGIES:
         send(chat,'Use /signal XAUUSD 15m direction|breakout|supply');return
     if strategy=='supply' and (symbol,tf)!=('XAUUSD','15m'):
         send(chat,'Supply & Demand is Gold 15m only.');return
-    bars=candles(symbol,tf)
+    try:bars=candles(symbol,tf)
+    except DataError as exc:
+        send(chat,'Live candles unavailable: '+str(exc)+' No signal generated.');return
     result=signals.calculate(bars,symbol,tf,strategy)
-    send(chat,signals.format_signal(result,symbol,tf,strategy,bars[-1]['t']+TIMEFRAMES[tf][1]))
+    send(chat,signals.format_signal(result,symbol,tf,strategy,bars[-1]['t']+TIMEFRAMES[tf][1]),buttons([('🔄 New analysis','again')]))
     if result['side'] in ('BUY','SELL') and result.get('entry'):
         try:
             from chart import signal_render
