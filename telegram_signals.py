@@ -15,6 +15,7 @@ CREATE TABLE IF NOT EXISTS signal_groups(group_id INTEGER PRIMARY KEY,symbol TEX
 CREATE TABLE IF NOT EXISTS signal_group_delivery(group_id INTEGER,event_id TEXT,created REAL,PRIMARY KEY(group_id,event_id));
 CREATE TABLE IF NOT EXISTS signal_group_extra(group_id INTEGER NOT NULL,symbol TEXT NOT NULL,tf TEXT NOT NULL,strategy TEXT NOT NULL,enabled INTEGER NOT NULL,started REAL NOT NULL,last_update REAL NOT NULL DEFAULT 0,PRIMARY KEY(group_id,symbol,tf,strategy));
 CREATE TABLE IF NOT EXISTS signal_group_trio_seed(group_id INTEGER PRIMARY KEY,seeded REAL NOT NULL);
+CREATE TABLE IF NOT EXISTS signal_group_breakout_seed(group_id INTEGER PRIMARY KEY,seeded REAL NOT NULL);
 CREATE TABLE IF NOT EXISTS signal_reminder_delivery(kind TEXT,target INTEGER,event_id TEXT,created REAL,PRIMARY KEY(kind,target,event_id));""")
 def config(uid):
     with features.connect() as db:
@@ -128,6 +129,33 @@ def seed_gold_silver_bitcoin_channels():
         return seeded
 
 
+def seed_gold_breakout_channels():
+    """One-time opt-in channel expansion: Gold M15 breakout reminders.
+
+    Preserve existing directional Gold/Silver/BTC markets, news, user choices.
+    Never overwrite a disabled existing breakout subscription.
+    """
+    with features.connect() as db:
+        setup_db(db)
+        rows=db.execute(
+            "SELECT group_id FROM signal_groups WHERE enabled=1 AND symbol='XAUUSD' AND tf='15m' AND strategy='direction'").fetchall()
+        added=0
+        for row in rows:
+            gid=row['group_id']
+            if db.execute('SELECT 1 FROM signal_group_breakout_seed WHERE group_id=?',(gid,)).fetchone():
+                continue
+            now=time.time()
+            prior=db.execute(
+                "SELECT enabled FROM signal_group_extra WHERE group_id=? AND symbol='XAUUSD' AND tf='15m' AND strategy='breakout'",
+                (gid,)).fetchone()
+            if prior is None:
+                db.execute("INSERT INTO signal_group_extra VALUES (?,?,?,?,?,?,0)",
+                           (gid,'XAUUSD','15m','breakout',1,now))
+                added+=1
+            db.execute('INSERT INTO signal_group_breakout_seed VALUES (?,?)',(gid,now))
+        return added
+
+
 def disable_group_markets(group_id):
     with features.connect() as db:
         setup_db(db)
@@ -167,39 +195,22 @@ def format_group_update(result,bars,symbol,tf):
             'Closed-candle reference, not a new trade signal.')
 
 def format_signal(result,symbol,tf,strategy,bar):
-    """Compact Telegram template; never claim a retest for indicator-only direction."""
+    """Clean, minimal Telegram signal. No invented confirmation or trade fills."""
     side=result.get('side','NEUTRAL')
-    timeframe={'5m':'M5','15m':'M15','30m':'M30','1h':'H1','4h':'H4'}.get(tf,tf.upper())
-    date=time.strftime('%d %b %H:%M UTC',time.gmtime(bar))
+    period={'5m':'M5','15m':'M15','30m':'M30','1h':'H1','4h':'H4'}.get(tf,tf.upper())
     if side not in ('BUY','SELL'):
-        status=result.get('status')
-        qualifier=f' ({status})' if status else ''
-        return (f'⚪ NEUTRAL\n{symbol} • {timeframe}\n'
-                f'No confirmed BUY/SELL setup{qualifier}.\n'
-                f'Last closed candle: {date}')
-    entry=result.get('entry');stop=result.get('stop');targets=result.get('targets') or []
-    if not (isinstance(entry,(int,float)) and isinstance(stop,(int,float)) and len(targets)>=2):
-        return f'⚪ NEUTRAL\n{symbol} • {timeframe}\nNo complete trade levels available.'
-    if strategy=='breakout' and result.get('status') in ('Confirmed','TP1 reached','TP2 reached'):
-        condition=('after an '+timeframe+' close above and successful retest.' if side=='BUY'
-                   else 'after an '+timeframe+' close below and failed retest.')
-    elif strategy=='supply':
-        condition='after a fresh-zone retest and engulfing confirmation.'
-    else:
-        condition='after an '+timeframe+' close with '+('bullish' if side=='BUY' else 'bearish')+' indicator alignment.'
-    def fmt(n):
-        if symbol in ('XAUUSD','BTCUSD','ETHUSD'):return f'{n:.2f}'
-        if symbol in ('USDJPY','GBPJPY','XAGUSD'):return f'{n:.3f}'
-        return f'{n:.5f}'
-    marker='🟢' if side=='BUY' else '🔴'
-    return (f'{marker} {side} setup\n'
-            f'{symbol} • {timeframe}\n'
-            f'Entry: {fmt(entry)}, {condition}\n'
-            f'🎯 T1: {fmt(targets[0])}\n'
-            f'🎯 T2: {fmt(targets[1])}\n'
-            f'🛑 SL: {fmt(stop)}\n'
-            f'Last closed candle: {date}\n'
-            'Reference levels only. No automatic trade execution.')
+        return f'⚪ {symbol} · {period}\nNo confirmed setup.'
+    entry=result.get('entry');sl=result.get('stop');tp=result.get('targets') or []
+    if not (isinstance(entry,(int,float)) and isinstance(sl,(int,float)) and len(tp)>=2):
+        return f'⚪ {symbol} · {period}\nNo confirmed setup.'
+    decimals=2 if symbol in ('XAUUSD','BTCUSD','ETHUSD') else 3 if symbol in ('XAGUSD','USDJPY','GBPJPY') else 5
+    number=lambda v:f'{v:.{decimals}f}'
+    icon='🟢' if side=='BUY' else '🔴'
+    title='Breakout + retest' if strategy=='breakout' else 'Supply/Demand' if strategy=='supply' else 'Directional'
+    return (f'{icon} {symbol} · {period} · {side}\n'
+            f'Entry {number(entry)}  |  SL {number(sl)}\n'
+            f'T1 {number(tp[0])}  |  T2 {number(tp[1])}\n'
+            f'{title} · closed candle · indicative levels')
 
 def format_analysis(result,bars,symbol,tf,strategy):
     """Add understandable market evidence using the SAME closed candles as the chart."""
@@ -349,10 +360,9 @@ def reminder_tick(send_fn,group_send_fn=None,now=None):
             fmt=(f'{level:.2f}' if isinstance(level,(int,float)) else '—')
             close=time.strftime('%H:%M UTC',time.gmtime(end))
             label='🟢' if side=='BUY' else '🔴'
-            message=(f'⏳ Potential {side} setup forming — {row["symbol"]} M15\\n'
-                     f'{label} Breakout level {fmt}; retest + directional close STILL required.\\n'
-                     f'Next candle close in ~{stage} min ({close}).\\n'
-                     'WATCH ONLY — not a confirmed signal. It may invalidate or expire.')
+            message=(f'⏳ {row["symbol"]} · M15 · {side} forming\n'
+                     f'Retest pending · candle close in ~{stage}m\n'
+                     'Not confirmed')
             targets=[('private',r['uid']) for r in subscriptions if r['symbol']==row['symbol'] and r['started']<=row['bar'] and features.allowed(r['uid'])]
             if group_send_fn:
                 targets.extend(('group',g['group_id']) for g in groups if g['symbol']==row['symbol'] and g['started']<=row['bar'])
