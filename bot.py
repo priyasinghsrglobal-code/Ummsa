@@ -397,7 +397,7 @@ def channel_command(update):
         return
     parts=(m.get('text') or '').strip().split()
     cmd=parts[0].split('@')[0].lower() if parts else ''
-    if cmd not in ('/channel_test','/channel_on','/channel_off','/channel_status','/channel_help','/news_on','/news_off','/engage_on','/engage_off'):
+    if cmd not in ('/channel_test','/channel_on','/channel_off','/channel_status','/channel_help','/channel_add','/channel_remove','/news_on','/news_off','/engage_on','/engage_off'):
         return
     log.info('Channel command received: %s',cmd)
     # A channel_post is authored through the channel's publishing rights.
@@ -421,19 +421,33 @@ def channel_command(update):
         return
     if cmd=='/channel_help':
         send(channel,'/channel_on XAUUSD 15m direction — enable automatic updates\n'
-                     '/channel_status — current settings\n'
+                     '/channel_add XAGUSD 15m direction — add market\n'
+                     '/channel_add BTCUSD 15m direction — add market\n'
+                     '/channel_remove SYMBOL TF STRATEGY — remove extra market\n'
+                     '/channel_status — list enabled markets\n'
                      '/channel_off — disable updates\n'
                      '/channel_test — check delivery')
         return
     cfg=signals.group_config(channel)
+    if cmd in ('/channel_add','/channel_remove'):
+        if len(parts) not in (3,4):
+            send(channel,'Use '+cmd+' XAGUSD 15m direction');return
+        sym,tf=parts[1].upper(),parts[2].lower()
+        strategy=parts[3].lower() if len(parts)==4 else 'direction'
+        try:
+            changed=(signals.add_group_market(channel,sym,tf,strategy) if cmd=='/channel_add'
+                     else signals.remove_group_market(channel,sym,tf,strategy))
+        except ValueError as exc:send(channel,str(exc));return
+        send(channel,('✅ Updated: ' if changed else 'Already configured: ')+sym+' '+tf+' '+strategy)
+        return
     if cmd=='/channel_status':
         if cfg:
-            send(channel,f'Channel broadcasts: {"ON" if cfg["enabled"] else "OFF"} | '
-                         f'{cfg["symbol"]} {cfg["tf"]} {cfg["strategy"]}')
+            send(channel,'Channel broadcasts: '+('ON' if cfg['enabled'] else 'OFF')+'\n'+
+                 '\n'.join(f"{r['symbol']} {r['tf']} {r['strategy']}" for r in signals.channel_markets(channel,enabled_only=True)) )
         else:send(channel,'Channel broadcasts OFF. Post /channel_on XAUUSD 15m direction.')
         return
     if cmd=='/channel_off':
-        if cfg:signals.configure_group(channel,cfg['symbol'],cfg['tf'],cfg['strategy'],False)
+        if cfg:signals.disable_group_markets(channel)
         send(channel,'Channel market updates and signals OFF.')
         return
     if len(parts) not in (3,4):
@@ -612,6 +626,8 @@ def main():
         threading.Thread(target=service_probe,daemon=True).start()
     if os.getenv('AI_STARTUP_CHECK','true').lower()=='true':
         threading.Thread(target=conversation_probe,daemon=True).start()
+    seeded=signals.seed_gold_silver_bitcoin_channels()
+    log.info('Additive Gold/Silver/Bitcoin channel migration: seeded %s existing channels',seeded)
     last_poll=time.time()  # Allow rollout healthcheck before old polling worker drains.
     offset=0;next_signal_scan=0;next_content_scan=0;signal_cursor=0;log.info('SR Market View polling started')
     while running:
