@@ -8,7 +8,6 @@ from mentor import route, snapshot, TV
 import features
 import telegram_signals as signals
 import channel_content
-import channel_content
 
 log=logging.getLogger('sr');logging.basicConfig(level=logging.INFO,format='%(levelname)s %(message)s')
 TOKEN=os.environ.get('TELEGRAM_BOT_TOKEN',''); KEY=os.environ.get('TWELVE_DATA_API_KEY','')
@@ -549,6 +548,8 @@ def main():
             updates=telegram('getUpdates',offset=offset,timeout=25,allowed_updates=['message','callback_query','channel_post'])
             last_poll=time.time()
             deliver_reminders()
+            try:signals.reminder_tick(send,lambda target,message:send(target,message))
+            except Exception:log.warning('Forming-setup reminder cycle failed')
             if time.time()>=next_content_scan:
                 next_content_scan=time.time()+1800
                 try:channel_content.tick(telegram,signals)
@@ -562,7 +563,7 @@ def main():
                 work=signals.tasks()
                 if work:
                     symbol,tf,strategy=work[signal_cursor%len(work)];signal_cursor+=1
-                    try:signals.once(symbol,tf,strategy,candles(symbol,tf),send,lambda chat,msg,bars,result: group_broadcast(chat,msg,bars,result,symbol,tf))
+                    try:signals.once(symbol,tf,strategy,candles(symbol,tf),send,lambda chat,msg,bars,result: group_broadcast(chat,msg,bars,result,symbol,tf),lambda uid,bars,result: photo(uid,__import__('chart').signal_render(bars,symbol,tf,result)))
                     except DataError as exc:log.warning('Signal scan paused: %s',str(exc))
                     except Exception:log.warning('Signal scan failed; retry at next interval')
             for update in updates:
