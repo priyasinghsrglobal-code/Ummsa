@@ -358,7 +358,9 @@ def handle(update):
     q=update.get('callback_query');m=q.get('message',{}) if q else update.get('message',{})
     actor=(q or m).get('from',{})
     uid=actor.get('id');chat=m.get('chat',{}).get('id')
-    if m.get('chat',{}).get('type') in ('group','supergroup'):\n        group_command(update);return\n    # Authorize the sender, including callback queries, before reading personal state.
+    if m.get('chat',{}).get('type') in ('group','supergroup'):
+        group_command(update);return
+    # Authorize the sender, including callback queries, before reading personal state.
     if not isinstance(uid,int) or actor.get('is_bot') or m.get('chat',{}).get('type')!='private' or uid!=chat:return
     text=m.get('text','').strip()
     if text.split('@')[0]=='/myid':send(chat,f'Your Telegram user ID: {uid}');return
