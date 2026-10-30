@@ -18,7 +18,7 @@ class SignalTests(unittest.TestCase):
         with self.assertRaises(ValueError):sig.configure(3,'EURUSD','5m','supply',True)
     def test_neutral_no_levels(self):
         result={'side':'NEUTRAL'}
-        self.assertIn('No aligned',sig.format_signal(result,'XAUUSD','15m','direction',900))
+        self.assertIn('No confirmed BUY/SELL',sig.format_signal(result,'XAUUSD','15m','direction',900))
     def test_first_scan_no_alert_then_once(self):
         bars=[dict(t=n*900,o=2400,h=2401,l=2399,c=2400) for n in range(90)]
         sig.configure(87,'XAUUSD','15m','direction',True)
@@ -30,11 +30,11 @@ class SignalTests(unittest.TestCase):
         with patch.object(features,'allowed',return_value=True),patch.object(sig,'calculate',return_value={'side':'BUY','entry':2409.,'stop':2390.,'targets':[2428.,2447.,2466.]}):
             self.assertEqual(sig.once('XAUUSD','15m','direction',future,lambda uid,msg:sent.append(msg)),'SIGNAL')
             self.assertEqual(sig.once('XAUUSD','15m','direction',future,lambda uid,msg:sent.append(msg)),'UNCHANGED')
-        self.assertEqual(len(sent),1);self.assertIn('TP3:',sent[0])
+        self.assertEqual(len(sent),1);self.assertIn('🎯 T2:',sent[0])
     def test_message_format_has_newlines(self):
         msg=sig.format_signal({'side':'BUY','entry':4033.,'stop':4028.,'targets':[4038.,4043.,4048.]},'XAUUSD','15m','direction',900)
-        self.assertIn('🟢 BUY setup\\n',msg)
-        self.assertIn('🎯 T1: 4038.00\\n',msg)
+        self.assertIn('🟢 BUY setup\n',msg)
+        self.assertIn('🎯 T1: 4038.00\n',msg)
         self.assertNotIn('\\\\n',msg)
     def test_neutral_chart_png(self):
         from chart import signal_render
@@ -52,7 +52,7 @@ class SignalTests(unittest.TestCase):
         message={'message':{'from':{'id':77},'chat':{'id':-10012345,'type':'supergroup'},'text':'/group_on XAUUSD 15m'}}
         with patch.object(bot,'group_admin',return_value=False),patch.object(bot,'send') as send:
             bot.handle(message)
-            self.assertIn('Only group admins',send.call_args.args[1])
+            self.assertIn('Group admin verification failed',send.call_args.args[1])
     def test_channel_test_requires_bot_admin(self):
         update={'channel_post':{'chat':{'id':-100888,'type':'channel'},'text':'/channel_test'}}
         with patch.object(bot,'telegram',side_effect=[{'id':15},{'status':'administrator','can_post_messages':True}]),patch.object(bot,'send') as send:
