@@ -7,6 +7,7 @@ from engine import SYMBOLS,TIMEFRAMES,DataError,validate,report,detailed_report,
 from mentor import route, snapshot, TV
 import features
 import telegram_signals as signals
+import channel_content
 
 log=logging.getLogger('sr');logging.basicConfig(level=logging.INFO,format='%(levelname)s %(message)s')
 TOKEN=os.environ.get('TELEGRAM_BOT_TOKEN',''); KEY=os.environ.get('TWELVE_DATA_API_KEY','')
@@ -371,6 +372,7 @@ def channel_command(update):
     except ValueError as exc:
         send(channel,str(exc))
         return
+    channel_content.set_settings(channel,news=True,engagement=True)
     log.info('Channel broadcasts enabled: %s %s %s',symbol,tf,strategy)
     send(channel,f'✅ Channel alerts ON | {symbol} {tf.upper()} | {strategy}\n'
                  'Automatic BUY/SELL changes and periodic closed-candle market updates.')
@@ -534,12 +536,16 @@ def main():
     if os.getenv('STARTUP_PROBE','false').lower()=='true':
         threading.Thread(target=service_probe,daemon=True).start()
     last_poll=time.time()  # Allow rollout healthcheck before old polling worker drains.
-    offset=0;next_signal_scan=0;signal_cursor=0;log.info('Signal bot polling started')
+    offset=0;next_signal_scan=0;next_content_scan=0;signal_cursor=0;log.info('Signal bot polling started')
     while running:
         try:
             updates=telegram('getUpdates',offset=offset,timeout=25,allowed_updates=['message','callback_query','channel_post'])
             last_poll=time.time()
             deliver_reminders()
+            if time.time()>=next_content_scan:
+                next_content_scan=time.time()+1800
+                try:channel_content.tick(telegram,signals)
+                except Exception:log.warning('Channel content job failed; retry next cycle')
             if time.time()>=next_signal_scan:
                 next_signal_scan=time.time()+max(90,int(os.getenv('TELEGRAM_SIGNAL_SCAN_SECONDS','90')))
                 work=signals.tasks()
