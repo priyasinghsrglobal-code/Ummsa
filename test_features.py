@@ -38,7 +38,7 @@ class FeaturesTests(unittest.TestCase):
   data=features.feedback_buttons(9,'answer')[0][0]['callback_data']
   self.assertIn('no longer',features.feedback(10,data));self.assertIn('saved',features.feedback(9,data))
  def test_faq_expiration_override(self):
-  self.assertIn('MetaTrader',features.faq_answer('about',self.state()))
+  self.assertIn('MT5',features.faq_answer('about',self.state()))
   features.put_setting('faq:about',{'en':'outdated','verified_at':0})
   self.assertIn('re-verification',features.faq_answer('about',self.state()))
   features.command(100,'/faq_set about | Approved | Approved hi',self.state())
@@ -46,7 +46,7 @@ class FeaturesTests(unittest.TestCase):
  def test_sr_works_without_ai(self):
   with patch.object(bot,'send') as send,patch.object(bot,'route',side_effect=AssertionError('AI called')):
    bot.handle(message(9,'SR kya hai?'));self.assertIn('SR Global',send.call_args.args[1])
-   bot.handle(message(9,'withdrawal pending hai'));self.assertIn('support@',send.call_args.args[1])
+   bot.handle(message(9,'support email'));self.assertIn('support@',send.call_args.args[1])
  def test_greeting_and_reset(self):
   with patch.object(bot,'send') as send:
    bot.handle(message(9,'/start'));self.assertNotIn('seedha',send.call_args.args[1])
