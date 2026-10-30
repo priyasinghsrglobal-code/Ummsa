@@ -12,7 +12,8 @@ def setup_db(db):
 CREATE TABLE IF NOT EXISTS signal_state(symbol TEXT,tf TEXT,strategy TEXT,bar REAL,side TEXT,data TEXT,PRIMARY KEY(symbol,tf,strategy));
 CREATE TABLE IF NOT EXISTS signal_delivery(uid INTEGER,event_id TEXT,created REAL,PRIMARY KEY(uid,event_id));
 CREATE TABLE IF NOT EXISTS signal_groups(group_id INTEGER PRIMARY KEY,symbol TEXT NOT NULL,tf TEXT NOT NULL,strategy TEXT NOT NULL,enabled INTEGER NOT NULL,started REAL NOT NULL,last_update REAL NOT NULL DEFAULT 0);
-CREATE TABLE IF NOT EXISTS signal_group_delivery(group_id INTEGER,event_id TEXT,created REAL,PRIMARY KEY(group_id,event_id));""")
+CREATE TABLE IF NOT EXISTS signal_group_delivery(group_id INTEGER,event_id TEXT,created REAL,PRIMARY KEY(group_id,event_id));
+CREATE TABLE IF NOT EXISTS signal_reminder_delivery(kind TEXT,target INTEGER,event_id TEXT,created REAL,PRIMARY KEY(kind,target,event_id));""")
 def config(uid):
     with features.connect() as db:
         setup_db(db)
@@ -140,7 +141,7 @@ def calculate(bars,symbol,tf,strategy,previous=None):
                     'entry':s.get('entry'),'stop':s['stop'],'targets':s.get('targets',[]),'setup':s,'status':s['status']}
     s,_=candidate(bars,symbol,tf,step)
     return {'side':'NEUTRAL','setup':s,'status':'Awaiting confirmation' if s else 'No setup'}
-def once(symbol,tf,strategy,bars,send_fn=None,group_send_fn=None):
+def once(symbol,tf,strategy,bars,send_fn=None,group_send_fn=None,private_chart_fn=None):
     """Scan one new closed candle; send signals and periodic group updates.
 
     Historical data never creates alerts at startup. Delivery is recorded only
@@ -173,6 +174,12 @@ def once(symbol,tf,strategy,bars,send_fn=None,group_send_fn=None):
                     setup_db(db)
                     if db.execute('SELECT 1 FROM signal_delivery WHERE uid=? AND event_id=?',(sub['uid'],eid)).fetchone():continue
                 send_fn(sub['uid'],msg)
+                if private_chart_fn:
+                    try:private_chart_fn(sub['uid'],bars,result)
+                    except Exception:
+                        # The text signal was delivered. A chart failure must not
+                        # repeat BUY/SELL alerts or prevent recording delivery.
+                        pass
                 with features.connect() as db:
                     db.execute('INSERT OR IGNORE INTO signal_delivery VALUES (?,?,?)',(sub['uid'],eid,time.time()))
             except Exception:pass
@@ -200,6 +207,69 @@ def tasks():
         private={(r['symbol'],r['tf'],r['strategy']) for r in db.execute('SELECT * FROM signal_subscriptions WHERE enabled=1') if features.allowed(r['uid'])}
         groups={(r['symbol'],r['tf'],r['strategy']) for r in db.execute('SELECT * FROM signal_groups WHERE enabled=1')}
         return sorted(private | groups)
+
+def reminder_tick(send_fn,group_send_fn=None,now=None):
+    """Opt-in breakout FORMING reminders for the next M15 candle only.
+
+    A confirmed breakout creates a pending retest zone. It cannot promise a
+    future confirmation: 15/10/5/1 are countdown to *candle close*, not a
+    forecast of the signal time. No fresh market-data requests are made.
+    A stage is recorded only after Telegram confirms send; duplicates blocked.
+    """
+    now=time.time() if now is None else now
+    with features.connect() as db:
+        setup_db(db)
+        rows=[dict(r) for r in db.execute("SELECT * FROM signal_state WHERE strategy='breakout' AND tf='15m'")]
+        subscriptions=[dict(r) for r in db.execute("SELECT * FROM signal_subscriptions WHERE enabled=1 AND strategy='breakout' AND tf='15m'")]
+        groups=[dict(r) for r in db.execute("SELECT * FROM signal_groups WHERE enabled=1 AND strategy='breakout' AND tf='15m'")]
+    count=0
+    for row in rows:
+        try:
+            result=json.loads(row['data'] or '{}')
+            setup=result.get('setup') or {}
+            if setup.get('status')!='Awaiting confirmation' or not setup.get('id'):
+                continue
+            # Only the immediate candle following the confirmed breakout is
+            # a countdown candidate. Later pending bars are not predicted.
+            if setup.get('created_at')!=row['bar']:
+                continue
+            end=row['bar']+TIMEFRAMES['15m'][1]
+            remaining=end-now
+            stage=next((m for m in (15,10,5,1) if m*60-60 < remaining <= m*60),None)
+            if stage is None or not (row['bar']<=now<end):
+                continue
+            event_id=f"{setup['id']}:{int(end)}:{stage}"
+            side=setup.get('side','')
+            if side not in ('BUY','SELL'):continue
+            level=setup.get('level')
+            fmt=(f'{level:.2f}' if isinstance(level,(int,float)) else '—')
+            close=time.strftime('%H:%M UTC',time.gmtime(end))
+            label='🟢' if side=='BUY' else '🔴'
+            message=(f'⏳ Potential {side} setup forming — {row["symbol"]} M15\\n'
+                     f'{label} Breakout level {fmt}; retest + directional close STILL required.\\n'
+                     f'Next candle close in ~{stage} min ({close}).\\n'
+                     'WATCH ONLY — not a confirmed signal. It may invalidate or expire.')
+            targets=[('private',r['uid']) for r in subscriptions if r['symbol']==row['symbol'] and r['started']<=row['bar'] and features.allowed(r['uid'])]
+            if group_send_fn:
+                targets.extend(('group',g['group_id']) for g in groups if g['symbol']==row['symbol'] and g['started']<=row['bar'])
+            for kind,target in targets:
+                with features.connect() as db:
+                    setup_db(db)
+                    if db.execute('SELECT 1 FROM signal_reminder_delivery WHERE kind=? AND target=? AND event_id=?',
+                                  (kind,target,event_id)).fetchone():
+                        continue
+                try:
+                    (send_fn if kind=='private' else group_send_fn)(target,message)
+                except Exception:
+                    continue
+                with features.connect() as db:
+                    db.execute('INSERT OR IGNORE INTO signal_reminder_delivery VALUES (?,?,?,?)',
+                               (kind,target,event_id,time.time()))
+                count+=1
+        except (TypeError,ValueError,KeyError):
+            continue
+    return count
+
 
 def format_brief(result,bars,symbol,tf,strategy):
     side=result.get('side','NEUTRAL')
