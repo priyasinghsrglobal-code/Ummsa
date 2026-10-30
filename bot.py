@@ -28,18 +28,16 @@ def telegram(method,**params):
     if not result.get('ok'): raise DataError('Telegram request failed.')
     return result.get('result')
 
-def send(chat,text,buttons=None,reply_to=None,keyboard=None):
+def send(chat,text,buttons=None):
     args=dict(chat_id=chat,text=text)
-    if keyboard:args['reply_markup']={'keyboard':[[{'text':v} for v in row] for row in keyboard], 'resize_keyboard':True,'one_time_keyboard':True}
-    elif buttons:args['reply_markup']={'inline_keyboard':buttons}
-    if reply_to:args['reply_parameters']={'message_id':reply_to,'allow_sending_without_reply':True}
+    if buttons:args['reply_markup']={'inline_keyboard':buttons}
     return telegram('sendMessage',**args)
 
 def buttons(items):
     cells=[{'text':label,'callback_data':data} for label,data in items]
     return [cells[i:i+2] for i in range(0,len(cells),2)]
 
-def photo(chat,png,reply_to=None):
+def photo(chat,png):
     boundary='SRMarketViewUploadBoundary'
     body=(f'--{boundary}\r\nContent-Disposition: form-data; name="chat_id"\r\n\r\n{chat}\r\n--{boundary}\r\nContent-Disposition: form-data; name="photo"; filename="chart.png"\r\nContent-Type: image/png\r\n\r\n').encode()+png+f'\r\n--{boundary}--\r\n'.encode()
     result=request(f'https://api.telegram.org/bot{TOKEN}/sendPhoto',body,{'Content-Type':f'multipart/form-data; boundary={boundary}'})
@@ -47,11 +45,8 @@ def photo(chat,png,reply_to=None):
 
 def candles(symbol,tf):
     k=(symbol,tf); now=time.time()
-    if k in cache:
-        try:
-            bars=validate(cache[k][1],symbol,tf,now)
-            if now<bars[-1]['t']+2*TIMEFRAMES[tf][1]:return bars
-        except DataError:cache.pop(k,None)
+    if k in cache and now-cache[k][0]<30:
+        return validate(cache[k][1],symbol,tf,now)
     api_calls[:]=[t for t in api_calls if now-t<60]
     if len(api_calls)>=int(os.getenv('DATA_REQUESTS_PER_MINUTE','6')):
         raise DataError('Market-data capacity reached. Please retry in one minute.')
@@ -279,41 +274,115 @@ def signal_command(chat,text):
     return False
 
 def handle_inner(update):
-    """Reply keyboard sends actual Telegram user messages for symbol and timeframe."""
-    q=update.get('callback_query')
-    m=q.get('message',{}) if q else update.get('message',{})
+    q=update.get('callback_query');m=q.get('message',{}) if q else update.get('message',{})
     chat=m.get('chat',{}).get('id')
-    if not chat or m.get('chat',{}).get('type')!='private':return
-    if q:
-        telegram('answerCallbackQuery',callback_query_id=q['id'])
-        signal_menu(chat);return
-    raw=m.get('text','').strip()
-    cmd=raw.split()[0].split('@')[0].lower() if raw else ''
-    if cmd in ('/start','/menu','/signals','/reset'):
-        signal_menu(chat);return
-    if cmd in ('/signals_off','/signals_status','/signal','/signals_on'):
-        try:signal_command(chat,raw)
-        except DataError as exc:send(chat,str(exc))
+    if not chat:return
+    if m.get('chat',{}).get('type')!='private':
+        if q:telegram('answerCallbackQuery',callback_query_id=q['id'],text='Open the bot in a private chat.')
         return
-    if cmd=='/myid':
-        send(chat,f'Your Telegram ID: {chat}');return
     state=session(chat)
-    symbol=raw.upper()
-    if symbol in SYMBOLS:
-        state['selection']={'symbol':symbol}
-        state['pending']='timeframe'
-        send(chat,f'{symbol} selected. Choose timeframe.',keyboard=[list(TIMEFRAMES)[i:i+2] for i in range(0,len(TIMEFRAMES),2)])
-        return
-    if raw.lower() in TIMEFRAMES and state.get('pending')=='timeframe':
-        symbol=state.get('selection',{}).get('symbol')
-        if not symbol:
-            signal_menu(chat);return
-        tf=raw.lower()
-        state['selection']['timeframe']=tf
+    if not q:
+        text=m.get('text','').strip()
+        cmd=text.split()[0].split('@')[0].lower() if text else ''
+        if cmd in ('/signals','/signals_on','/signals_off','/signals_status','/signal'):
+            signal_command(chat,text);return
+        if cmd in ('/start','/reset'):
+            if cmd=='/reset':
+                state['history']=[];state['selection']={};state['preferences']={};state['pending']=None;state['last_failure']=None
+            send(chat,features.WELCOME if cmd=='/start' else 'Conversation aur preferences clear ho gaye. Journal aur watchlist retained hain; /delete_my_data se sab erase kar sakte hain.')
+            return
+        if cmd=='/menu':
+            send(chat,'Select symbol',buttons([(v,'s:'+v) for v in SYMBOLS]));return
+        if cmd=='/privacy':
+            send(chat,'Recent conversation, preferences and journal are saved privately for your Telegram ID. AI requests include recent context and preferences. Failed questions may be visible to the bot owner for 7 days; never send passwords or ID documents. /reset clears context; /delete_my_data confirm erases saved personal data.');return
+        try:
+            result=features.command(chat,text,state)
+            if result is None and text:
+                result=features.numbers_review(text)
+            if result is not None:
+                send(chat,result);return
+        except (ValueError,OverflowError):
+            send(chat,'Input format check karein. Prices/amounts finite positive numbers hone chahiye; command without values se example milega.');return
+        if text.startswith('/'):
+            send(chat,'Command recognise nahi hua. /help mein available options hain.');return
+        quick=fast_reply(text,state,m)
+        if quick is not None:
+            remember(state,text,quick);send(chat,quick);return
+        direct=direct_market(text,state)
+        if direct:
+            kind,question=direct
+            if kind=='ask':remember(state,text,question);send(chat,question);return
+            state['history'].append({'role':'user','text':text[:3000]})
+            sel=state['selection'];state['last_failure']=None
+            if kind=='chart':
+                chart_for_chat(chat,sel['symbol'],sel['timeframe'])
+            else:analyze_for_chat(chat,sel['symbol'],sel['timeframe'],sel.get('method','Price Action'),question=question)
+            return
         state['pending']=None
-        signal_now(chat,symbol,tf,'direction')
+        topic=features.faq_topic(text)
+        if topic:
+            reply=features.faq_answer(topic,state,text)
+            if not re.search(r'\b(link|url|website|portal|contact|email)\b',text,re.I):
+                reply=re.sub(r'Official website:\s*https?://\S+','',reply)
+                reply=re.sub(r'https?://\S+','official website',reply).strip()
+            send(chat,reply,features.feedback_buttons(chat,'sr_faq'))
+            state['history'].extend([{'role':'user','text':text[:3000]},{'role':'assistant','text':reply}]);return
+        if not text:
+            send(chat,'Abhi text mein baat kar sakte hain. Apna sawaal type kar do—chart main khud fetch karunga.');return
+        try:telegram('sendChatAction',chat_id=chat,action='typing')
+        except DataError:pass
+        try:
+            answer=route(text,state['history'],{**state['selection'],'preferences':state.get('preferences',{}),'reply_to':m.get('reply_to_message',{}).get('text','')[:1500]})
+            state['last_failure']=None
+            state['history'].append({'role':'user','text':text[:3000]})
+            if answer.get('symbol') and answer['symbol']!=state['selection'].get('symbol'):
+                state['selection']={}
+            for key in ('symbol','timeframe','method'):
+                if answer.get(key):state['selection'][key]=answer[key]
+            chart_request=wants_chart(text) or (answer['action']=='chart' and not chart_veto(text))
+            if answer['action']=='analyze' or chart_request:
+                sel=state['selection']
+                state['pending']={'action':'chart' if chart_request else 'analyze','question':text}
+                if not sel.get('symbol'):reply='Kaunsa symbol dekhna hai—Gold, EURUSD ya koi aur?'
+                elif not sel.get('timeframe'):reply='Kaunsa timeframe dekhein—5m, 15m, 30m, 1h ya 4h?'
+                else:
+                    state['pending']=None
+                    if chart_request:
+                        chart_for_chat(chat,sel['symbol'],sel['timeframe'])
+                    else:
+                        analyze_for_chat(chat,sel['symbol'],sel['timeframe'],sel.get('method','Price Action'),question=text)
+                    return
+            else:reply=answer['reply'][:1500]
+            send(chat,reply or 'Apna sawaal thoda aur detail mein bataiye?',features.feedback_buttons(chat,'conversation'))
+            state['history'].append({'role':'assistant','text':reply});state['history']=state['history'][-12:]
+            log.info('AI conversation reply delivered')
+        except DataError as exc:
+            features.issue(chat,text)
+            features.event('ai_failure')
+            reply='Abhi jawab dene mein dikkat aa rahi hai. Thodi der baad dobara try karein.' if features.language(text,state)=='hi' else 'I’m having trouble replying right now. Please try again shortly.'
+            remember(state,text,reply)
+            state['last_failure']={'at':time.time()}
+            send(chat,reply)
+            log.warning('AI conversation unavailable')
         return
-    signal_menu(chat)
+    telegram('answerCallbackQuery',callback_query_id=q['id'])
+    if q.get('data','').startswith('sig:'):
+        # Explicit signal UI callbacks are separate from legacy analysis flow.
+        parts=q['data'].split(':')
+        if len(parts)==4 and parts[1] in SYMBOLS and parts[2] in TIMEFRAMES and parts[3] in signals.STRATEGIES:
+            signal_now(chat,parts[1],parts[2],parts[3]);return
+    if q.get('data','').startswith('fb:'):
+        send(chat,features.feedback(chat,q['data']));return
+    parts=q.get('data','').split(':')
+    if len(parts)==2 and parts[0]=='s' and parts[1] in SYMBOLS:
+        state['selection']={'symbol':parts[1]}
+        send(chat,'Select timeframe',buttons([(tf,f't:{parts[1]}:{tf}') for tf in TIMEFRAMES]));return
+    if len(parts)==3 and parts[0]=='t' and parts[1] in SYMBOLS and parts[2] in TIMEFRAMES:
+        state['selection']={'symbol':parts[1],'timeframe':parts[2]}
+        send(chat,'Select analysis method',buttons([(v,f'a:{parts[1]}:{parts[2]}:{v}') for v in ('SMC','Price Action')]));return
+    if len(parts)==4 and parts[0]=='a' and parts[1] in SYMBOLS and parts[2] in TIMEFRAMES and parts[3] in ('SMC','Price Action'):
+        analyze_for_chat(chat,*parts[1:]);return
+    send(chat,'Selection samajh nahi aaya. /start se dobara shuru karein?')
 
 def channel_command(update):
     """Channel admins post channel commands; verify the bot can post there.
@@ -449,11 +518,11 @@ def group_broadcast(chat,message,bars,result,symbol,tf):
 
 
 def handle(update):
-    if (update.get('channel_post') or {}).get('chat',{}).get('type')=='channel':
-        channel_command(update);return
     q=update.get('callback_query');m=q.get('message',{}) if q else update.get('message',{})
     actor=(q or m).get('from',{})
     uid=actor.get('id');chat=m.get('chat',{}).get('id')
+    if (update.get('channel_post') or {}).get('chat',{}).get('type')=='channel':
+        channel_command(update);return
     if m.get('chat',{}).get('type') in ('group','supergroup'):
         group_command(update);return
     # Authorize the sender, including callback queries, before reading personal state.
@@ -528,7 +597,7 @@ def main():
     if not TOKEN or not KEY:
         log.error('Required secure variables missing: TELEGRAM_BOT_TOKEN / TWELVE_DATA_API_KEY');return 1
     with features.connect() as db:db.execute('SELECT 1')
-    log.info('Signal bot: persistent storage ready; admin configured=%s',bool(features.owners()))
+    log.info('SR assistant v2: persistent storage ready; admin configured=%s',bool(features.owners()))
     me=telegram('getMe')
     if me.get('username','').lower()!='srglobal_bot':
         log.error('Token does not belong to expected bot @srglobal_bot');return 1
@@ -541,8 +610,10 @@ def main():
     signal.signal(signal.SIGTERM,stop);signal.signal(signal.SIGINT,stop)
     if os.getenv('STARTUP_PROBE','false').lower()=='true':
         threading.Thread(target=service_probe,daemon=True).start()
+    if os.getenv('AI_STARTUP_CHECK','true').lower()=='true':
+        threading.Thread(target=conversation_probe,daemon=True).start()
     last_poll=time.time()  # Allow rollout healthcheck before old polling worker drains.
-    offset=0;next_signal_scan=0;next_content_scan=0;signal_cursor=0;log.info('Signal bot polling started')
+    offset=0;next_signal_scan=0;next_content_scan=0;signal_cursor=0;log.info('SR Market View polling started')
     while running:
         try:
             updates=telegram('getUpdates',offset=offset,timeout=25,allowed_updates=['message','callback_query','channel_post'])
@@ -550,22 +621,22 @@ def main():
             deliver_reminders()
             try:signals.reminder_tick(send,lambda target,message:send(target,message))
             except Exception:log.warning('Forming-setup reminder cycle failed')
-            if time.time()>=next_content_scan:
-                next_content_scan=time.time()+1800
-                try:channel_content.tick(telegram,signals)
-                except Exception:log.warning('News/engagement scan unavailable; signals unaffected')
-            if time.time()>=next_content_scan:
-                next_content_scan=time.time()+1800
-                try:channel_content.tick(telegram,signals)
-                except Exception:log.warning('Channel content job failed; retry next cycle')
             if time.time()>=next_signal_scan:
                 next_signal_scan=time.time()+max(90,int(os.getenv('TELEGRAM_SIGNAL_SCAN_SECONDS','90')))
                 work=signals.tasks()
                 if work:
                     symbol,tf,strategy=work[signal_cursor%len(work)];signal_cursor+=1
-                    try:signals.once(symbol,tf,strategy,candles(symbol,tf),send,lambda chat,msg,bars,result: group_broadcast(chat,msg,bars,result,symbol,tf),lambda uid,bars,result: photo(uid,__import__('chart').signal_render(bars,symbol,tf,result)))
+                    try:
+                        bars=candles(symbol,tf)
+                        signals.once(symbol,tf,strategy,bars,send,
+                            lambda chat,msg,bars,result:group_broadcast(chat,msg,bars,result,symbol,tf),
+                            lambda uid,bars,result:photo(uid,__import__('chart').signal_render(bars,symbol,tf,result)))
                     except DataError as exc:log.warning('Signal scan paused: %s',str(exc))
                     except Exception:log.warning('Signal scan failed; retry at next interval')
+            if time.time()>=next_content_scan:
+                next_content_scan=time.time()+1800
+                try:channel_content.tick(telegram,signals)
+                except Exception:log.warning('Content scan unavailable; signal monitoring unaffected')
             for update in updates:
                 try:handle(update)
                 except Exception:
