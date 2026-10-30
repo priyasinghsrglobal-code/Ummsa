@@ -34,5 +34,5 @@ class SignalTests(unittest.TestCase):
         from chart import signal_render
         bars=[dict(t=n*900,o=2400,h=2401,l=2399,c=2400) for n in range(90)]
         png=signal_render(bars,'XAUUSD','15m',{'side':'BUY','entry':2400.,'stop':2390.,'targets':[2410.,2420.,2430.]})
-        self.assertTrue(png.startswith(b'\\x89PNG'))
+        self.assertTrue(png[:4]==bytes([137,80,78,71]))
 if __name__=='__main__':unittest.main()
