@@ -133,3 +133,33 @@ def tasks():
     with features.connect() as db:
         setup_db(db)
         return sorted({(r['symbol'],r['tf'],r['strategy']) for r in db.execute('SELECT * FROM signal_subscriptions WHERE enabled=1') if features.allowed(r['uid'])})
+
+def format_brief(result,bars,symbol,tf,strategy):
+    side=result.get('side','NEUTRAL')
+    if side in ('BUY','SELL') and result.get('entry') and result.get('stop') and len(result.get('targets') or [])>=2:
+        return format_signal(result,symbol,tf,strategy,bars[-1]['t']+TIMEFRAMES[tf][1]).split('Last closed candle:')[0].strip()
+    from engine import indicators
+    i=indicators(bars)
+    price=bars[-1]['c']
+    digits=2 if symbol in ('XAUUSD','BTCUSD','ETHUSD') else 3 if symbol in ('XAGUSD','USDJPY','GBPJPY') else 5
+    return (f'⚪ NEUTRAL | {symbol} {tf.upper()}\\n'
+            f'Price: {price:.{digits}f}\\n'
+            f'RSI: {i["rsi"]:.1f} | No aligned BUY/SELL setup.\\n'
+            'Wait for confirmation.')
+
+def tradingview_annotations(bars,symbol,tf,result):
+    from datetime import datetime,timezone
+    side=result.get('side','NEUTRAL')
+    def line(price,label,color):
+        return {'name':'Horizontal Line','input':{'price':price,'text':label},
+                'override':{'lineColor':color,'textColor':color,'fontSize':12}}
+    drawings=[]
+    if side in ('BUY','SELL') and result.get('entry') and result.get('stop'):
+        levels=[('Entry',result['entry'],'rgb(234,179,8)'),('SL',result['stop'],'rgb(239,68,68)')]
+        levels.extend((f'T{i+1}',v,'rgb(34,197,94)') for i,v in enumerate((result.get('targets') or [])[:2]))
+        drawings=[line(v,n,c) for n,v,c in levels]
+    else:
+        from engine import analyze
+        ctx=analyze(bars,'Price Action')
+        drawings=[line(ctx['support'],'Support','rgb(34,197,94)'),line(ctx['resistance'],'Resistance','rgb(239,68,68)')]
+    return {'drawings':drawings}
