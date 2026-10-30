@@ -314,6 +314,85 @@ def handle_inner(update):
         return
     signal_menu(chat)
 
+def channel_command(update):
+    """Channel admins post channel commands; verify the bot can post there.
+
+    Channel posts have no reliable individual user identity. Do NOT treat
+    anonymous channel posts as personal account commands.
+    """
+    m=update.get('channel_post') or {}
+    chat_info=m.get('chat') or {}
+    channel=chat_info.get('id')
+    if chat_info.get('type')!='channel' or not isinstance(channel,int) or channel>=0:
+        return
+    parts=(m.get('text') or '').strip().split()
+    cmd=parts[0].split('@')[0].lower() if parts else ''
+    if cmd not in ('/channel_test','/channel_on','/channel_off','/channel_status','/channel_help'):
+        return
+    log.info('Channel command received: %s',cmd)
+    # A channel_post is authored through the channel's publishing rights.
+    # Verify this bot itself is an administrator with permission to publish.
+    try:
+        me=telegram('getMe')
+        member=telegram('getChatMember',chat_id=channel,user_id=me['id'])
+        if member.get('status') not in ('administrator','creator') or member.get('can_post_messages') is False:
+            log.warning('Channel bot is not permitted to post')
+            return
+    except (DataError,KeyError,TypeError):
+        log.warning('Channel administrative permission verification failed')
+        return
+    if cmd=='/channel_test':
+        send(channel,'✅ Channel delivery working. Test message only — no trading signal.')
+        return
+    if cmd=='/channel_help':
+        send(channel,'/channel_on XAUUSD 15m direction — enable automatic updates\n'
+                     '/channel_status — current settings\n'
+                     '/channel_off — disable updates\n'
+                     '/channel_test — check delivery')
+        return
+    cfg=signals.group_config(channel)
+    if cmd=='/channel_status':
+        if cfg:
+            send(channel,f'Channel broadcasts: {"ON" if cfg["enabled"] else "OFF"} | '
+                         f'{cfg["symbol"]} {cfg["tf"]} {cfg["strategy"]}')
+        else:send(channel,'Channel broadcasts OFF. Post /channel_on XAUUSD 15m direction.')
+        return
+    if cmd=='/channel_off':
+        if cfg:signals.configure_group(channel,cfg['symbol'],cfg['tf'],cfg['strategy'],False)
+        send(channel,'Channel market updates and signals OFF.')
+        return
+    if len(parts) not in (3,4):
+        send(channel,'Use /channel_on XAUUSD 15m direction')
+        return
+    symbol=parts[1].upper();tf=parts[2].lower()
+    strategy=parts[3].lower() if len(parts)==4 else 'direction'
+    try:
+        signals.configure_group(channel,symbol,tf,strategy,True)
+    except ValueError as exc:
+        send(channel,str(exc))
+        return
+    log.info('Channel broadcasts enabled: %s %s %s',symbol,tf,strategy)
+    send(channel,f'✅ Channel alerts ON | {symbol} {tf.upper()} | {strategy}\n'
+                 'Automatic BUY/SELL changes and periodic closed-candle market updates.')
+    # Send an immediate current snapshot, never a fabricated historical BUY/SELL alert.
+    try:
+        bars=candles(symbol,tf)
+        result=signals.calculate(bars,symbol,tf,strategy)
+        send(channel,signals.format_group_update(result,bars,symbol,tf))
+        with features.connect() as db:
+            signals.setup_db(db)
+            db.execute('UPDATE signal_groups SET last_update=? WHERE group_id=? AND enabled=1',
+                       (bars[-1]['t']+TIMEFRAMES[tf][1],channel))
+        log.info('Channel initial market update delivered')
+    except DataError as exc:
+        log.warning('Channel initial market data unavailable: %s',str(exc))
+        send(channel,'Initial live market data unavailable. Auto-scans remain enabled; '
+                     'no signal is issued without verified candles.')
+    except Exception:
+        log.warning('Channel initial snapshot failed; auto-scans remain configured')
+        send(channel,'Initial market update could not load. Scheduled monitoring remains ON.')
+
+
 def group_admin(chat,uid):
     """Only Telegram-reported creator/administrator may configure group broadcasts."""
     try:
@@ -362,6 +441,8 @@ def group_broadcast(chat,message,bars,result,symbol,tf):
 
 
 def handle(update):
+    if (update.get('channel_post') or {}).get('chat',{}).get('type')=='channel':
+        channel_command(update);return
     q=update.get('callback_query');m=q.get('message',{}) if q else update.get('message',{})
     actor=(q or m).get('from',{})
     uid=actor.get('id');chat=m.get('chat',{}).get('id')
@@ -456,7 +537,7 @@ def main():
     offset=0;next_signal_scan=0;signal_cursor=0;log.info('Signal bot polling started')
     while running:
         try:
-            updates=telegram('getUpdates',offset=offset,timeout=25,allowed_updates=['message','callback_query'])
+            updates=telegram('getUpdates',offset=offset,timeout=25,allowed_updates=['message','callback_query','channel_post'])
             last_poll=time.time()
             deliver_reminders()
             if time.time()>=next_signal_scan:
