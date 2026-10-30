@@ -26,14 +26,34 @@ def configure(uid,symbol,tf,strategy,enabled):
         started=time.time() if changed else old['started']
         db.execute('INSERT OR REPLACE INTO signal_subscriptions VALUES (?,?,?,?,?,?)',(uid,symbol,tf,strategy,int(enabled),started))
 def format_signal(result,symbol,tf,strategy,bar):
-    fmt=lambda n:f'{n:.5f}'.rstrip('0').rstrip('.')
-    side=result['side']
-    title=f'{symbol} {tf} | {STRATEGIES[strategy]} | {side}'
+    """Telegram's compact setup template, with real computed reference levels."""
+    side=result.get('side','NEUTRAL')
+    tf_label={'5m':'M5','15m':'M15','30m':'M30','1h':'H1','4h':'H4'}.get(tf,tf.upper())
     date=time.strftime('%d %b %H:%M UTC',time.gmtime(bar))
-    if side=='NEUTRAL':return title+f'\nCandle closed {date}\nNo aligned BUY/SELL signal. Wait.'
-    return (f'{title}\nClosed candle: {date}\nEntry: {fmt(result["entry"])}\nSL: {fmt(result["stop"])}\n'
-        + '\n'.join(f'TP{i+1}: {fmt(t)}' for i,t in enumerate(result['targets'][:3]))
-        +'\nReference levels only; not broker fills. No orders are placed.')
+    if side not in ('BUY','SELL'):
+        return f'⚪ NEUTRAL\\n{symbol} • {tf_label}\\nNo confirmed direction right now.\\nLast candle: {date}'
+    entry=result.get('entry');stop=result.get('stop');targets=result.get('targets') or []
+    if not (isinstance(entry,(int,float)) and isinstance(stop,(int,float)) and len(targets)>=2):
+        return f'⚪ NEUTRAL\\n{symbol} • {tf_label}\\nNo complete trade levels available.'
+    # Only the breakout engine verifies a later retest. Direction mode does not.
+    if strategy=='breakout' and result.get('status') in ('Confirmed','TP1 reached','TP2 reached'):
+        phrase=('after an '+tf_label+' close above and successful retest.' if side=='BUY'
+                else 'after an '+tf_label+' close below and failed retest.')
+    elif strategy=='supply':
+        phrase='after fresh-zone retest and engulfing candle confirmation.'
+    else:
+        phrase='after an '+tf_label+' close with '+('bullish' if side=='BUY' else 'bearish')+' indicator alignment.'
+    fmt=lambda n:f'{n:.5f}'.rstrip('0').rstrip('.') if abs(n)<10 else f'{n:.2f}'
+    mark='🟢' if side=='BUY' else '🔴'
+    return (f'{mark} {side} setup\\n'
+            f'{symbol} • {tf_label}\\n'
+            f'Entry: {fmt(entry)}, {phrase}\\n'
+            f'🎯 T1: {fmt(targets[0])}\\n'
+            f'🎯 T2: {fmt(targets[1])}\\n'
+            f'🛑 SL: {fmt(stop)}\\n'
+            f'Last closed candle: {date}\\n'
+            'Indicative levels only · No trade execution.')
+
 def calculate(bars,symbol,tf,strategy,previous=None):
     step=TIMEFRAMES[tf][1]
     if strategy=='direction':
