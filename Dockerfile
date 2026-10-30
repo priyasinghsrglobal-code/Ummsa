@@ -3,7 +3,7 @@ WORKDIR /app
 ENV PYTHONUNBUFFERED=1 MPLCONFIGDIR=/tmp/matplotlib
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
-COPY engine.py chart.py mentor.py features.py bot.py directional_signal.py web_engine.py supply_signal.py telegram_signals.py ./
+COPY engine.py chart.py mentor.py features.py bot.py directional_signal.py web_engine.py supply_signal.py telegram_signals.py channel_content.py ./
 RUN useradd --create-home bot
 COPY entrypoint.sh /entrypoint.sh
 RUN chmod +x /entrypoint.sh
