@@ -41,6 +41,18 @@ class SignalTests(unittest.TestCase):
         bars=[dict(t=n*900,o=2400,h=2401,l=2399,c=2400) for n in range(90)]
         png=signal_render(bars,'XAUUSD','15m',{'side':'NEUTRAL'})
         self.assertEqual(png[:4],bytes([137,80,78,71]))
+    def test_group_subscription_lifecycle(self):
+        sig.configure_group(-100123456,'XAUUSD','15m','direction',True)
+        self.assertEqual(sig.group_config(-100123456)['enabled'],1)
+        self.assertIn(('XAUUSD','15m','direction'),sig.tasks())
+        sig.configure_group(-100123456,'XAUUSD','15m','direction',False)
+        self.assertEqual(sig.group_config(-100123456)['enabled'],0)
+    def test_group_admin_restriction(self):
+        from unittest.mock import patch
+        message={'message':{'from':{'id':77},'chat':{'id':-10012345,'type':'supergroup'},'text':'/group_on XAUUSD 15m'}}
+        with patch.object(bot,'group_admin',return_value=False),patch.object(bot,'send') as send:
+            bot.handle(message)
+            self.assertIn('Only group admins',send.call_args.args[1])
     def test_chart_png(self):
         from chart import signal_render
         bars=[dict(t=n*900,o=2400,h=2401,l=2399,c=2400) for n in range(90)]
