@@ -10,7 +10,9 @@ STRATEGIES={'direction':'Market Direction','breakout':'Breakout & Retest','suppl
 def setup_db(db):
     db.executescript("""CREATE TABLE IF NOT EXISTS signal_subscriptions(uid INTEGER PRIMARY KEY,symbol TEXT,tf TEXT,strategy TEXT,enabled INTEGER,started REAL);
 CREATE TABLE IF NOT EXISTS signal_state(symbol TEXT,tf TEXT,strategy TEXT,bar REAL,side TEXT,data TEXT,PRIMARY KEY(symbol,tf,strategy));
-CREATE TABLE IF NOT EXISTS signal_delivery(uid INTEGER,event_id TEXT,created REAL,PRIMARY KEY(uid,event_id));""")
+CREATE TABLE IF NOT EXISTS signal_delivery(uid INTEGER,event_id TEXT,created REAL,PRIMARY KEY(uid,event_id));
+CREATE TABLE IF NOT EXISTS signal_groups(group_id INTEGER PRIMARY KEY,symbol TEXT NOT NULL,tf TEXT NOT NULL,strategy TEXT NOT NULL,enabled INTEGER NOT NULL,started REAL NOT NULL,last_update REAL NOT NULL DEFAULT 0);
+CREATE TABLE IF NOT EXISTS signal_group_delivery(group_id INTEGER,event_id TEXT,created REAL,PRIMARY KEY(group_id,event_id));""")
 def config(uid):
     with features.connect() as db:
         setup_db(db)
@@ -25,6 +27,43 @@ def configure(uid,symbol,tf,strategy,enabled):
         changed=not old or any(old[k]!=v for k,v in [('symbol',symbol),('tf',tf),('strategy',strategy)]) or not old['enabled']
         started=time.time() if changed else old['started']
         db.execute('INSERT OR REPLACE INTO signal_subscriptions VALUES (?,?,?,?,?,?)',(uid,symbol,tf,strategy,int(enabled),started))
+def group_config(group_id):
+    with features.connect() as db:
+        setup_db(db)
+        row=db.execute('SELECT * FROM signal_groups WHERE group_id=?',(group_id,)).fetchone()
+        return dict(row) if row else None
+
+def configure_group(group_id,symbol='XAUUSD',tf='15m',strategy='direction',enabled=True):
+    if not isinstance(group_id,int) or group_id>=0:
+        raise ValueError('Group chat ID must be negative.')
+    if symbol not in SYMBOLS or tf not in TIMEFRAMES or strategy not in STRATEGIES:
+        raise ValueError('Unsupported symbol, timeframe or strategy.')
+    if strategy=='supply' and (symbol,tf)!=('XAUUSD','15m'):
+        raise ValueError('Supply & Demand supports XAUUSD 15m only.')
+    with features.connect() as db:
+        setup_db(db)
+        old=db.execute('SELECT * FROM signal_groups WHERE group_id=?',(group_id,)).fetchone()
+        changed=not old or not old['enabled'] or any(old[key]!=v for key,v in (('symbol',symbol),('tf',tf),('strategy',strategy)))
+        started=time.time() if changed else old['started']
+        last_update=0 if changed else old['last_update']
+        db.execute('INSERT OR REPLACE INTO signal_groups VALUES (?,?,?,?,?,?,?)',
+                   (group_id,symbol,tf,strategy,int(bool(enabled)),started,last_update))
+    return group_config(group_id)
+
+def format_group_update(result,bars,symbol,tf):
+    from engine import indicators,analyze
+    i=indicators(bars);ctx=analyze(bars,'Price Action')
+    side=result.get('side','NEUTRAL')
+    digits=2 if symbol in ('XAUUSD','BTCUSD','ETHUSD') else 3 if symbol in ('XAGUSD','USDJPY','GBPJPY') else 5
+    fmt=lambda v:f'{v:.{digits}f}'
+    stamp=time.strftime('%d %b %H:%M UTC',time.gmtime(bars[-1]['t']+TIMEFRAMES[tf][1]))
+    status='🟢 Bullish view' if side=='BUY' else '🔴 Bearish view' if side=='SELL' else '⚪ Neutral view'
+    return (f'📊 Market update | {symbol} {tf.upper()}\n'
+            f'{status} | Close: {fmt(bars[-1]["c"])}\n'
+            f'RSI: {i["rsi"]:.1f} | Support: {fmt(ctx["support"])} | Resistance: {fmt(ctx["resistance"])}\n'
+            f'Candle: {stamp}\n'
+            'Closed-candle reference, not a new trade signal.')
+
 def format_signal(result,symbol,tf,strategy,bar):
     """Compact Telegram template; never claim a retest for indicator-only direction."""
     side=result.get('side','NEUTRAL')
@@ -101,8 +140,12 @@ def calculate(bars,symbol,tf,strategy,previous=None):
                     'entry':s.get('entry'),'stop':s['stop'],'targets':s.get('targets',[]),'setup':s,'status':s['status']}
     s,_=candidate(bars,symbol,tf,step)
     return {'side':'NEUTRAL','setup':s,'status':'Awaiting confirmation' if s else 'No setup'}
-def once(symbol,tf,strategy,bars,send_fn=None):
-    """First observation only creates a baseline; later *new candle* BUY/SELL transitions alert."""
+def once(symbol,tf,strategy,bars,send_fn=None,group_send_fn=None):
+    """Scan one new closed candle; send signals and periodic group updates.
+
+    Historical data never creates alerts at startup. Delivery is recorded only
+    after successful send; failed sends remain visible in server logs.
+    """
     close=bars[-1]['t']+TIMEFRAMES[tf][1]
     with features.connect() as db:
         setup_db(db)
@@ -110,29 +153,53 @@ def once(symbol,tf,strategy,bars,send_fn=None):
         previous=json.loads(row['data']) if row and row['data'] else None
         if row and close<=row['bar']:return 'UNCHANGED'
         result=calculate(bars,symbol,tf,strategy,previous)
-        side=result['side']
+        side=result.get('side','NEUTRAL')
         db.execute('INSERT OR REPLACE INTO signal_state VALUES (?,?,?,?,?,?)',
                    (symbol,tf,strategy,close,side,json.dumps(result)))
-        if row is None or side not in ('BUY','SELL') or side==row['side']:return 'BASELINE'
-        eid=hashlib.sha256(f'{strategy}:{symbol}:{tf}:{close}:{side}'.encode()).hexdigest()
         targets=result.get('targets') or []
-        if not (result.get('entry') and result.get('stop') and len(targets)>=3):return 'NO_LEVELS'
-        message=format_signal(result,symbol,tf,strategy,close)
-        recipients=[dict(r) for r in db.execute('SELECT * FROM signal_subscriptions WHERE enabled=1 AND symbol=? AND tf=? AND strategy=? AND started<=?',(symbol,tf,strategy,close))]
-    if send_fn:
-        for sub in recipients:
+        event=bool(row is not None and side in ('BUY','SELL') and side!=row['side'] and
+                   result.get('entry') is not None and result.get('stop') is not None and len(targets)>=2)
+        eid=hashlib.sha256(f'{strategy}:{symbol}:{tf}:{int(close)}:{side}'.encode()).hexdigest()
+        private=[dict(x) for x in db.execute('SELECT * FROM signal_subscriptions WHERE enabled=1 AND symbol=? AND tf=? AND strategy=? AND started<=?',
+                     (symbol,tf,strategy,close))] if event else []
+        groups=[dict(x) for x in db.execute('SELECT * FROM signal_groups WHERE enabled=1 AND symbol=? AND tf=? AND strategy=? AND started<=?',
+                  (symbol,tf,strategy,close))]
+    if send_fn and event:
+        msg=format_signal(result,symbol,tf,strategy,close)
+        for sub in private:
             if not features.allowed(sub['uid']):continue
             try:
-                send_fn(sub['uid'],message)
                 with features.connect() as db:
                     setup_db(db)
+                    if db.execute('SELECT 1 FROM signal_delivery WHERE uid=? AND event_id=?',(sub['uid'],eid)).fetchone():continue
+                send_fn(sub['uid'],msg)
+                with features.connect() as db:
                     db.execute('INSERT OR IGNORE INTO signal_delivery VALUES (?,?,?)',(sub['uid'],eid,time.time()))
             except Exception:pass
-    return 'SIGNAL'
+    if group_send_fn:
+        interval=max(3600,int(__import__('os').getenv('GROUP_UPDATE_INTERVAL_SECONDS','14400')))
+        for sub in groups:
+            should_update=not event and (close-sub['last_update']>=interval)
+            if not event and not should_update:continue
+            try:
+                with features.connect() as db:
+                    if event and db.execute('SELECT 1 FROM signal_group_delivery WHERE group_id=? AND event_id=?',(sub['group_id'],eid)).fetchone():
+                        continue
+                message=(format_signal(result,symbol,tf,strategy,close) if event
+                         else format_group_update(result,bars,symbol,tf))
+                group_send_fn(sub['group_id'],message,bars,result)
+                with features.connect() as db:
+                    if event:db.execute('INSERT OR IGNORE INTO signal_group_delivery VALUES (?,?,?)',(sub['group_id'],eid,time.time()))
+                    db.execute('UPDATE signal_groups SET last_update=? WHERE group_id=? AND enabled=1',(close,sub['group_id']))
+            except Exception:pass
+    return 'SIGNAL' if event else 'BASELINE' if row is None else 'NO_SIGNAL'
+
 def tasks():
     with features.connect() as db:
         setup_db(db)
-        return sorted({(r['symbol'],r['tf'],r['strategy']) for r in db.execute('SELECT * FROM signal_subscriptions WHERE enabled=1') if features.allowed(r['uid'])})
+        private={(r['symbol'],r['tf'],r['strategy']) for r in db.execute('SELECT * FROM signal_subscriptions WHERE enabled=1') if features.allowed(r['uid'])}
+        groups={(r['symbol'],r['tf'],r['strategy']) for r in db.execute('SELECT * FROM signal_groups WHERE enabled=1')}
+        return sorted(private | groups)
 
 def format_brief(result,bars,symbol,tf,strategy):
     side=result.get('side','NEUTRAL')
