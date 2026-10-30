@@ -314,11 +314,51 @@ def handle_inner(update):
         return
     signal_menu(chat)
 
+def group_admin(chat,uid):
+    """Only Telegram-reported creator/administrator may configure group broadcasts."""
+    try:
+        member=telegram('getChatMember',chat_id=chat,user_id=uid)
+        return member.get('status') in ('administrator','creator')
+    except DataError:return False
+
+def group_command(update):
+    m=update.get('message') or {}
+    chat=m.get('chat',{}).get('id');uid=m.get('from',{}).get('id')
+    if m.get('chat',{}).get('type') not in ('group','supergroup') or not isinstance(uid,int):return
+    parts=m.get('text','').strip().split()
+    cmd=parts[0].split('@')[0].lower() if parts else ''
+    if cmd not in ('/group_on','/group_off','/group_status','/group_help'):return
+    if not group_admin(chat,uid):
+        send(chat,'Only group admins can configure market updates.');return
+    if cmd=='/group_help':
+        send(chat,'/group_on XAUUSD 15m direction — turn on alerts and periodic market updates.\n/group_off — stop updates.\n/group_status — view settings.');return
+    cfg=signals.group_config(chat)
+    if cmd=='/group_status':
+        send(chat,(f'Group updates: {"ON" if cfg["enabled"] else "OFF"} | {cfg["symbol"]} {cfg["tf"]} {cfg["strategy"]}' if cfg else 'Group alerts OFF. /group_help'));return
+    if cmd=='/group_off':
+        if cfg:signals.configure_group(chat,cfg['symbol'],cfg['tf'],cfg['strategy'],False)
+        send(chat,'Group signal broadcasts OFF.');return
+    if len(parts) not in (3,4):
+        send(chat,'Use /group_on XAUUSD 15m direction');return
+    symbol=parts[1].upper();tf=parts[2].lower();strategy=parts[3].lower() if len(parts)==4 else 'direction'
+    try:signals.configure_group(chat,symbol,tf,strategy,True)
+    except ValueError as exc:send(chat,str(exc));return
+    send(chat,f'✅ Group broadcasts ON — {symbol} {tf.upper()} ({strategy}).\nNew BUY/SELL changes + periodic market updates. First scan is a baseline, not a historical alert.')
+
+def group_broadcast(chat,message,bars,result):
+    """Telegram market chart image only when a directional signal occurs."""
+    send(chat,message)
+    if result.get('side') not in ('BUY','SELL') or 'setup' not in message:return
+    try:
+        from chart import signal_render
+        photo(chat,signal_render(bars,'XAUUSD' if not bars else getattr(group_broadcast,'symbol','XAUUSD'),getattr(group_broadcast,'tf','15m'),result))
+    except Exception:log.warning('Group signal image unavailable; text sent')
+
 def handle(update):
     q=update.get('callback_query');m=q.get('message',{}) if q else update.get('message',{})
     actor=(q or m).get('from',{})
     uid=actor.get('id');chat=m.get('chat',{}).get('id')
-    # Authorize the sender, including callback queries, before reading personal state.
+    if m.get('chat',{}).get('type') in ('group','supergroup'):\n        group_command(update);return\n    # Authorize the sender, including callback queries, before reading personal state.
     if not isinstance(uid,int) or actor.get('is_bot') or m.get('chat',{}).get('type')!='private' or uid!=chat:return
     text=m.get('text','').strip()
     if text.split('@')[0]=='/myid':send(chat,f'Your Telegram user ID: {uid}');return
@@ -415,7 +455,7 @@ def main():
                 work=signals.tasks()
                 if work:
                     symbol,tf,strategy=work[signal_cursor%len(work)];signal_cursor+=1
-                    try:signals.once(symbol,tf,strategy,candles(symbol,tf),send)
+                    try:signals.once(symbol,tf,strategy,candles(symbol,tf),send,lambda chat,msg,bars,result: send(chat,msg))
                     except DataError as exc:log.warning('Signal scan paused: %s',str(exc))
                     except Exception:log.warning('Signal scan failed; retry at next interval')
             for update in updates:
