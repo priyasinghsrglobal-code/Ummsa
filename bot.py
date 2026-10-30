@@ -628,6 +628,8 @@ def main():
         threading.Thread(target=conversation_probe,daemon=True).start()
     seeded=signals.seed_gold_silver_bitcoin_channels()
     log.info('Additive Gold/Silver/Bitcoin channel migration: seeded %s existing channels',seeded)
+    breakout_added=signals.seed_gold_breakout_channels()
+    log.info('Gold breakout channel monitoring enabled for %s existing channels',breakout_added)
     last_poll=time.time()  # Allow rollout healthcheck before old polling worker drains.
     offset=0;next_signal_scan=0;next_content_scan=0;signal_cursor=0;log.info('SR Market View polling started')
     while running:
