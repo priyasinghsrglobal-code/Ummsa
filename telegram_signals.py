@@ -13,6 +13,8 @@ CREATE TABLE IF NOT EXISTS signal_state(symbol TEXT,tf TEXT,strategy TEXT,bar RE
 CREATE TABLE IF NOT EXISTS signal_delivery(uid INTEGER,event_id TEXT,created REAL,PRIMARY KEY(uid,event_id));
 CREATE TABLE IF NOT EXISTS signal_groups(group_id INTEGER PRIMARY KEY,symbol TEXT NOT NULL,tf TEXT NOT NULL,strategy TEXT NOT NULL,enabled INTEGER NOT NULL,started REAL NOT NULL,last_update REAL NOT NULL DEFAULT 0);
 CREATE TABLE IF NOT EXISTS signal_group_delivery(group_id INTEGER,event_id TEXT,created REAL,PRIMARY KEY(group_id,event_id));
+CREATE TABLE IF NOT EXISTS signal_group_extra(group_id INTEGER NOT NULL,symbol TEXT NOT NULL,tf TEXT NOT NULL,strategy TEXT NOT NULL,enabled INTEGER NOT NULL,started REAL NOT NULL,last_update REAL NOT NULL DEFAULT 0,PRIMARY KEY(group_id,symbol,tf,strategy));
+CREATE TABLE IF NOT EXISTS signal_group_trio_seed(group_id INTEGER PRIMARY KEY,seeded REAL NOT NULL);
 CREATE TABLE IF NOT EXISTS signal_reminder_delivery(kind TEXT,target INTEGER,event_id TEXT,created REAL,PRIMARY KEY(kind,target,event_id));""")
 def config(uid):
     with features.connect() as db:
@@ -50,6 +52,105 @@ def configure_group(group_id,symbol='XAUUSD',tf='15m',strategy='direction',enabl
         db.execute('INSERT OR REPLACE INTO signal_groups VALUES (?,?,?,?,?,?,?)',
                    (group_id,symbol,tf,strategy,int(bool(enabled)),started,last_update))
     return group_config(group_id)
+
+def _validate_group_market(group_id,symbol,tf,strategy):
+    if not isinstance(group_id,int) or group_id>=0:
+        raise ValueError('Group/channel chat ID must be negative.')
+    if symbol not in SYMBOLS or tf not in TIMEFRAMES or strategy not in STRATEGIES:
+        raise ValueError('Unsupported symbol, timeframe or strategy.')
+    if strategy=='supply' and (symbol,tf)!=('XAUUSD','15m'):
+        raise ValueError('Supply & Demand supports XAUUSD 15m only.')
+
+
+def add_group_market(group_id,symbol,tf='15m',strategy='direction'):
+    """Add a market without replacing the original channel and its news settings."""
+    _validate_group_market(group_id,symbol,tf,strategy)
+    with features.connect() as db:
+        setup_db(db)
+        main=db.execute('SELECT * FROM signal_groups WHERE group_id=?',(group_id,)).fetchone()
+        if not main or not main['enabled']:
+            raise ValueError('Enable channel alerts first with /channel_on.')
+        if (main['symbol'],main['tf'],main['strategy'])==(symbol,tf,strategy):
+            return False
+        existing=db.execute('SELECT enabled FROM signal_group_extra WHERE group_id=? AND symbol=? AND tf=? AND strategy=?',
+                            (group_id,symbol,tf,strategy)).fetchone()
+        if existing and existing['enabled']:return False
+        now=time.time()
+        db.execute('INSERT OR REPLACE INTO signal_group_extra VALUES (?,?,?,?,?,?,0)',
+                   (group_id,symbol,tf,strategy,1,now))
+        return True
+
+
+def remove_group_market(group_id,symbol,tf='15m',strategy='direction'):
+    _validate_group_market(group_id,symbol,tf,strategy)
+    with features.connect() as db:
+        setup_db(db)
+        main=db.execute('SELECT * FROM signal_groups WHERE group_id=?',(group_id,)).fetchone()
+        if main and (main['symbol'],main['tf'],main['strategy'])==(symbol,tf,strategy):
+            raise ValueError('Primary market cannot be removed. Use /channel_off to turn off all, or /channel_on to change the primary.')
+        return bool(db.execute('UPDATE signal_group_extra SET enabled=0 WHERE group_id=? AND symbol=? AND tf=? AND strategy=?',
+                        (group_id,symbol,tf,strategy)).rowcount)
+
+
+def channel_markets(group_id,enabled_only=False):
+    with features.connect() as db:
+        setup_db(db)
+        main=db.execute('SELECT * FROM signal_groups WHERE group_id=?',(group_id,)).fetchone()
+        extra=[dict(r) for r in db.execute('SELECT * FROM signal_group_extra WHERE group_id=? ORDER BY symbol,tf,strategy',(group_id,))]
+    result=[dict(main)] if main else []
+    result.extend(extra)
+    if enabled_only:
+        result=[r for r in result if r['enabled']]
+    return result
+
+
+def seed_gold_silver_bitcoin_channels():
+    """One-time additive migration for existing opt-in Gold M15 direction channels.
+
+    Never reenable a market after user removal, /channel_off or /news_off.
+    Existing primary subscription remains unchanged. Does not send a historic
+    BUY/SELL trade signal at startup.
+    """
+    with features.connect() as db:
+        setup_db(db)
+        rows=db.execute("SELECT group_id FROM signal_groups WHERE enabled=1 AND symbol='XAUUSD' AND tf='15m' AND strategy='direction'").fetchall()
+        seeded=0
+        for row in rows:
+            gid=row['group_id']
+            if db.execute('SELECT 1 FROM signal_group_trio_seed WHERE group_id=?',(gid,)).fetchone():
+                continue
+            now=time.time()
+            for sym in ('XAGUSD','BTCUSD'):
+                db.execute('INSERT OR IGNORE INTO signal_group_extra VALUES (?,?,?,?,?,?,0)',
+                           (gid,sym,'15m','direction',1,now))
+            db.execute('INSERT INTO signal_group_trio_seed VALUES (?,?)',(gid,now))
+            seeded+=1
+        return seeded
+
+
+def disable_group_markets(group_id):
+    with features.connect() as db:
+        setup_db(db)
+        db.execute('UPDATE signal_groups SET enabled=0 WHERE group_id=?',(group_id,))
+        db.execute('UPDATE signal_group_extra SET enabled=0 WHERE group_id=?',(group_id,))
+
+
+def _primary_market(db,group_id):
+    row=db.execute('SELECT symbol,tf,strategy FROM signal_groups WHERE group_id=?',(group_id,)).fetchone()
+    return (row['symbol'],row['tf'],row['strategy']) if row else None
+
+
+def enabled_group_markets(db,symbol=None,tf=None,strategy=None):
+    """Merge primary and extra channels with one entry per channel/market."""
+    criteria=lambda r:(symbol is None or r['symbol']==symbol) and (tf is None or r['tf']==tf) and (strategy is None or r['strategy']==strategy)
+    main=[dict(r) for r in db.execute('SELECT * FROM signal_groups WHERE enabled=1')]
+    extra=[dict(r) for r in db.execute('SELECT e.* FROM signal_group_extra e JOIN signal_groups g ON e.group_id=g.group_id WHERE e.enabled=1 AND g.enabled=1')]
+    unique={}
+    for entry in main+extra:
+        if criteria(entry):
+            unique[(entry['group_id'],entry['symbol'],entry['tf'],entry['strategy'])]=entry
+    return list(unique.values())
+
 
 def format_group_update(result,bars,symbol,tf):
     from engine import indicators,analyze
@@ -163,8 +264,7 @@ def once(symbol,tf,strategy,bars,send_fn=None,group_send_fn=None,private_chart_f
         eid=hashlib.sha256(f'{strategy}:{symbol}:{tf}:{int(close)}:{side}'.encode()).hexdigest()
         private=[dict(x) for x in db.execute('SELECT * FROM signal_subscriptions WHERE enabled=1 AND symbol=? AND tf=? AND strategy=? AND started<=?',
                      (symbol,tf,strategy,close))] if event else []
-        groups=[dict(x) for x in db.execute('SELECT * FROM signal_groups WHERE enabled=1 AND symbol=? AND tf=? AND strategy=? AND started<=?',
-                  (symbol,tf,strategy,close))]
+        groups=[x for x in enabled_group_markets(db,symbol,tf,strategy) if x['started']<=close]
     if send_fn and event:
         msg=format_signal(result,symbol,tf,strategy,close)
         for sub in private:
@@ -197,7 +297,11 @@ def once(symbol,tf,strategy,bars,send_fn=None,group_send_fn=None,private_chart_f
                 group_send_fn(sub['group_id'],message,bars,result)
                 with features.connect() as db:
                     if event:db.execute('INSERT OR IGNORE INTO signal_group_delivery VALUES (?,?,?)',(sub['group_id'],eid,time.time()))
-                    db.execute('UPDATE signal_groups SET last_update=? WHERE group_id=? AND enabled=1',(close,sub['group_id']))
+                    if (sub['symbol'],sub['tf'],sub['strategy'])==_primary_market(db,sub['group_id']):
+                        db.execute('UPDATE signal_groups SET last_update=? WHERE group_id=? AND enabled=1',(close,sub['group_id']))
+                    else:
+                        db.execute('UPDATE signal_group_extra SET last_update=? WHERE group_id=? AND symbol=? AND tf=? AND strategy=? AND enabled=1',
+                                   (close,sub['group_id'],symbol,tf,strategy))
             except Exception:pass
     return 'SIGNAL' if event else 'BASELINE' if row is None else 'NO_SIGNAL'
 
@@ -205,7 +309,7 @@ def tasks():
     with features.connect() as db:
         setup_db(db)
         private={(r['symbol'],r['tf'],r['strategy']) for r in db.execute('SELECT * FROM signal_subscriptions WHERE enabled=1') if features.allowed(r['uid'])}
-        groups={(r['symbol'],r['tf'],r['strategy']) for r in db.execute('SELECT * FROM signal_groups WHERE enabled=1')}
+        groups={(r['symbol'],r['tf'],r['strategy']) for r in enabled_group_markets(db)}
         return sorted(private | groups)
 
 def reminder_tick(send_fn,group_send_fn=None,now=None):
@@ -221,7 +325,7 @@ def reminder_tick(send_fn,group_send_fn=None,now=None):
         setup_db(db)
         rows=[dict(r) for r in db.execute("SELECT * FROM signal_state WHERE strategy='breakout' AND tf='15m'")]
         subscriptions=[dict(r) for r in db.execute("SELECT * FROM signal_subscriptions WHERE enabled=1 AND strategy='breakout' AND tf='15m'")]
-        groups=[dict(r) for r in db.execute("SELECT * FROM signal_groups WHERE enabled=1 AND strategy='breakout' AND tf='15m'")]
+        groups=enabled_group_markets(db,tf='15m',strategy='breakout')
     count=0
     for row in rows:
         try:
