@@ -327,9 +327,13 @@ def group_command(update):
     if m.get('chat',{}).get('type') not in ('group','supergroup') or not isinstance(uid,int):return
     parts=m.get('text','').strip().split()
     cmd=parts[0].split('@')[0].lower() if parts else ''
-    if cmd not in ('/group_on','/group_off','/group_status','/group_help'):return
+    if cmd not in ('/group_on','/group_off','/group_status','/group_help','/group_test'):return
+    log.info('Group command received: %s',cmd)
     if not group_admin(chat,uid):
-        send(chat,'Only group admins can configure market updates.');return
+        log.warning('Group command not authorized or getChatMember unavailable: %s',cmd)
+        send(chat,'Group admin verification failed. Make the bot an admin with Post Messages permission, then retry.');return
+    if cmd=='/group_test':
+        send(chat,'✅ Group message delivery working. This is a test, not a trading signal.');return
     if cmd=='/group_help':
         send(chat,'/group_on XAUUSD 15m direction — turn on alerts and periodic market updates.\n/group_off — stop updates.\n/group_status — view settings.');return
     cfg=signals.group_config(chat)
@@ -343,6 +347,7 @@ def group_command(update):
     symbol=parts[1].upper();tf=parts[2].lower();strategy=parts[3].lower() if len(parts)==4 else 'direction'
     try:signals.configure_group(chat,symbol,tf,strategy,True)
     except ValueError as exc:send(chat,str(exc));return
+    log.info('Group broadcasts configured for %s %s %s',symbol,tf,strategy)
     send(chat,f'✅ Group broadcasts ON — {symbol} {tf.upper()} ({strategy}).\nNew BUY/SELL changes + periodic market updates. First scan is a baseline, not a historical alert.')
 
 def group_broadcast(chat,message,bars,result,symbol,tf):
