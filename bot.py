@@ -303,7 +303,7 @@ def handle_inner(update):
         state['pending']='timeframe'
         send(chat,f'{symbol} selected. Choose timeframe.',keyboard=[list(TIMEFRAMES)[i:i+2] for i in range(0,len(TIMEFRAMES),2)])
         return
-    if raw.lower() in TIMEFRAMES:
+    if raw.lower() in TIMEFRAMES and state.get('pending')=='timeframe':
         symbol=state.get('selection',{}).get('symbol')
         if not symbol:
             signal_menu(chat);return
