@@ -345,14 +345,16 @@ def group_command(update):
     except ValueError as exc:send(chat,str(exc));return
     send(chat,f'✅ Group broadcasts ON — {symbol} {tf.upper()} ({strategy}).\nNew BUY/SELL changes + periodic market updates. First scan is a baseline, not a historical alert.')
 
-def group_broadcast(chat,message,bars,result):
-    """Telegram market chart image only when a directional signal occurs."""
+def group_broadcast(chat,message,bars,result,symbol,tf):
     send(chat,message)
-    if result.get('side') not in ('BUY','SELL') or 'setup' not in message:return
+    if result.get('side') not in ('BUY','SELL') or not result.get('entry'):
+        return
     try:
         from chart import signal_render
-        photo(chat,signal_render(bars,'XAUUSD' if not bars else getattr(group_broadcast,'symbol','XAUUSD'),getattr(group_broadcast,'tf','15m'),result))
-    except Exception:log.warning('Group signal image unavailable; text sent')
+        photo(chat,signal_render(bars,symbol,tf,result))
+    except Exception:
+        log.warning('Group signal chart unavailable; text signal was delivered')
+
 
 def handle(update):
     q=update.get('callback_query');m=q.get('message',{}) if q else update.get('message',{})
@@ -457,7 +459,7 @@ def main():
                 work=signals.tasks()
                 if work:
                     symbol,tf,strategy=work[signal_cursor%len(work)];signal_cursor+=1
-                    try:signals.once(symbol,tf,strategy,candles(symbol,tf),send,lambda chat,msg,bars,result: send(chat,msg))
+                    try:signals.once(symbol,tf,strategy,candles(symbol,tf),send,lambda chat,msg,bars,result: group_broadcast(chat,msg,bars,result,symbol,tf))
                     except DataError as exc:log.warning('Signal scan paused: %s',str(exc))
                     except Exception:log.warning('Signal scan failed; retry at next interval')
             for update in updates:
