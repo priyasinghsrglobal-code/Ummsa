@@ -53,6 +53,16 @@ class SignalTests(unittest.TestCase):
         with patch.object(bot,'group_admin',return_value=False),patch.object(bot,'send') as send:
             bot.handle(message)
             self.assertIn('Only group admins',send.call_args.args[1])
+    def test_channel_test_requires_bot_admin(self):
+        update={'channel_post':{'chat':{'id':-100888,'type':'channel'},'text':'/channel_test'}}
+        with patch.object(bot,'telegram',side_effect=[{'id':15},{'status':'administrator','can_post_messages':True}]),patch.object(bot,'send') as send:
+            bot.handle(update)
+            self.assertIn('Channel delivery working',send.call_args.args[1])
+    def test_channel_test_denies_non_admin(self):
+        update={'channel_post':{'chat':{'id':-100888,'type':'channel'},'text':'/channel_test'}}
+        with patch.object(bot,'telegram',side_effect=[{'id':15},{'status':'member'}]),patch.object(bot,'send') as send:
+            bot.handle(update)
+            send.assert_not_called()
     def test_chart_png(self):
         from chart import signal_render
         bars=[dict(t=n*900,o=2400,h=2401,l=2399,c=2400) for n in range(90)]
