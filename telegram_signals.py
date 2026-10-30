@@ -26,33 +26,64 @@ def configure(uid,symbol,tf,strategy,enabled):
         started=time.time() if changed else old['started']
         db.execute('INSERT OR REPLACE INTO signal_subscriptions VALUES (?,?,?,?,?,?)',(uid,symbol,tf,strategy,int(enabled),started))
 def format_signal(result,symbol,tf,strategy,bar):
-    """Telegram's compact setup template, with real computed reference levels."""
+    """Compact Telegram template; never claim a retest for indicator-only direction."""
     side=result.get('side','NEUTRAL')
-    tf_label={'5m':'M5','15m':'M15','30m':'M30','1h':'H1','4h':'H4'}.get(tf,tf.upper())
+    timeframe={'5m':'M5','15m':'M15','30m':'M30','1h':'H1','4h':'H4'}.get(tf,tf.upper())
     date=time.strftime('%d %b %H:%M UTC',time.gmtime(bar))
     if side not in ('BUY','SELL'):
-        return f'⚪ NEUTRAL\\n{symbol} • {tf_label}\\nNo confirmed direction right now.\\nLast candle: {date}'
+        status=result.get('status')
+        qualifier=f' ({status})' if status else ''
+        return (f'⚪ NEUTRAL\n{symbol} • {timeframe}\n'
+                f'No confirmed BUY/SELL setup{qualifier}.\n'
+                f'Last closed candle: {date}')
     entry=result.get('entry');stop=result.get('stop');targets=result.get('targets') or []
     if not (isinstance(entry,(int,float)) and isinstance(stop,(int,float)) and len(targets)>=2):
-        return f'⚪ NEUTRAL\\n{symbol} • {tf_label}\\nNo complete trade levels available.'
-    # Only the breakout engine verifies a later retest. Direction mode does not.
+        return f'⚪ NEUTRAL\n{symbol} • {timeframe}\nNo complete trade levels available.'
     if strategy=='breakout' and result.get('status') in ('Confirmed','TP1 reached','TP2 reached'):
-        phrase=('after an '+tf_label+' close above and successful retest.' if side=='BUY'
-                else 'after an '+tf_label+' close below and failed retest.')
+        condition=('after an '+timeframe+' close above and successful retest.' if side=='BUY'
+                   else 'after an '+timeframe+' close below and failed retest.')
     elif strategy=='supply':
-        phrase='after fresh-zone retest and engulfing candle confirmation.'
+        condition='after a fresh-zone retest and engulfing confirmation.'
     else:
-        phrase='after an '+tf_label+' close with '+('bullish' if side=='BUY' else 'bearish')+' indicator alignment.'
-    fmt=lambda n:f'{n:.5f}'.rstrip('0').rstrip('.') if abs(n)<10 else f'{n:.2f}'
-    mark='🟢' if side=='BUY' else '🔴'
-    return (f'{mark} {side} setup\\n'
-            f'{symbol} • {tf_label}\\n'
-            f'Entry: {fmt(entry)}, {phrase}\\n'
-            f'🎯 T1: {fmt(targets[0])}\\n'
-            f'🎯 T2: {fmt(targets[1])}\\n'
-            f'🛑 SL: {fmt(stop)}\\n'
-            f'Last closed candle: {date}\\n'
-            'Indicative levels only · No trade execution.')
+        condition='after an '+timeframe+' close with '+('bullish' if side=='BUY' else 'bearish')+' indicator alignment.'
+    def fmt(n):
+        if symbol in ('XAUUSD','BTCUSD','ETHUSD'):return f'{n:.2f}'
+        if symbol in ('USDJPY','GBPJPY','XAGUSD'):return f'{n:.3f}'
+        return f'{n:.5f}'
+    marker='🟢' if side=='BUY' else '🔴'
+    return (f'{marker} {side} setup\n'
+            f'{symbol} • {timeframe}\n'
+            f'Entry: {fmt(entry)}, {condition}\n'
+            f'🎯 T1: {fmt(targets[0])}\n'
+            f'🎯 T2: {fmt(targets[1])}\n'
+            f'🛑 SL: {fmt(stop)}\n'
+            f'Last closed candle: {date}\n'
+            'Reference levels only. No automatic trade execution.')
+
+def format_analysis(result,bars,symbol,tf,strategy):
+    """Add understandable market evidence using the SAME closed candles as the chart."""
+    from engine import analyze,indicators
+    candle=bars[-1]
+    ctx=analyze(bars,'Price Action')
+    metrics=indicators(bars)
+    digits=2 if symbol in ('XAUUSD','BTCUSD','ETHUSD') else 3 if symbol in ('XAGUSD','USDJPY','GBPJPY') else 5
+    fmt=lambda n:f'{n:,.{digits}f}'
+    base=format_signal(result,symbol,tf,strategy,candle['t']+TIMEFRAMES[tf][1])
+    aligned='Bullish' if candle['c']>metrics['ema20']>metrics['ema50'] else 'Bearish' if candle['c']<metrics['ema20']<metrics['ema50'] else 'Mixed'
+    macd='Positive' if metrics['histogram']>0 else 'Negative' if metrics['histogram']<0 else 'Flat'
+    details=(f'\n\n📊 Market analysis\n'
+             f'Closed price: {fmt(candle["c"])}\n'
+             f'Trend / EMAs: {aligned}\n'
+             f'EMA20: {fmt(metrics["ema20"])} | EMA50: {fmt(metrics["ema50"])}\n'
+             f'RSI (14): {metrics["rsi"]:.1f} | MACD momentum: {macd}\n'
+             f'Support: {fmt(ctx["support"])} | Resistance: {fmt(ctx["resistance"])}')
+    if result.get('side')=='NEUTRAL':
+        details+='\n⏳ Wait: indicators are not aligned for a directional signal. Entry, SL and targets are withheld.'
+    elif strategy=='direction':
+        details+='\n⚠️ Directional indicator alignment only — a confirmed breakout/retest is not implied.'
+    elif result.get('status'):
+        details+=f'\nSetup status: {result["status"]}'
+    return base+details+'\n\nData: Twelve Data · validated closed candles (not a live executable quote).'
 
 def calculate(bars,symbol,tf,strategy,previous=None):
     step=TIMEFRAMES[tf][1]
