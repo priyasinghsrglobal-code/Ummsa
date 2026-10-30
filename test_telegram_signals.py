@@ -22,11 +22,12 @@ class SignalTests(unittest.TestCase):
     def test_first_scan_no_alert_then_once(self):
         bars=[dict(t=n*900,o=2400,h=2401,l=2399,c=2400) for n in range(90)]
         sig.configure(87,'XAUUSD','15m','direction',True)
+        with features.connect() as db:db.execute('UPDATE signal_subscriptions SET started=0 WHERE uid=87')
         sent=[]
         with patch.object(features,'allowed',return_value=True),patch.object(sig,'calculate',return_value={'side':'NEUTRAL'}):
             self.assertEqual(sig.once('XAUUSD','15m','direction',bars,lambda uid,msg:sent.append(msg)),'BASELINE')
         future=bars+[dict(t=90*900,o=2400,h=2410,l=2398,c=2409)]
-        with patch.object(features,'allowed',return_value=True),patch.object(sig,'calculate',return_value={'side':'BUY','entry':2409.,'stop':2390.,'targets':[2428.,2447.,2466.]}),patch.object(sig.time,'time',return_value=1000000):
+        with patch.object(features,'allowed',return_value=True),patch.object(sig,'calculate',return_value={'side':'BUY','entry':2409.,'stop':2390.,'targets':[2428.,2447.,2466.]}):
             self.assertEqual(sig.once('XAUUSD','15m','direction',future,lambda uid,msg:sent.append(msg)),'SIGNAL')
             self.assertEqual(sig.once('XAUUSD','15m','direction',future,lambda uid,msg:sent.append(msg)),'UNCHANGED')
         self.assertEqual(len(sent),1);self.assertIn('TP3:',sent[0])
