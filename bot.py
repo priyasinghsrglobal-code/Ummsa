@@ -49,8 +49,15 @@ def photo(chat,png,caption=None):
 
 def candles(symbol,tf):
     k=(symbol,tf); now=time.time()
-    if k in cache and now-cache[k][0]<30:
-        return validate(cache[k][1],symbol,tf,now)
+    if k in cache:
+        try:
+            bars=validate(cache[k][1],symbol,tf,now)
+            # Reuse the same last fully closed candle until the following
+            # timeframe close; no needless provider calls every 30 seconds.
+            if now < bars[-1]['t'] + 2*TIMEFRAMES[tf][1]:
+                return bars
+        except DataError:
+            cache.pop(k,None)
     api_calls[:]=[t for t in api_calls if now-t<60]
     if len(api_calls)>=int(os.getenv('DATA_REQUESTS_PER_MINUTE','6')):
         raise DataError('Market-data capacity reached. Please retry in one minute.')
