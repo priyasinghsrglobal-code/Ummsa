@@ -320,7 +320,10 @@ def tasks():
     with features.connect() as db:
         setup_db(db)
         private={(r['symbol'],r['tf'],r['strategy']) for r in db.execute('SELECT * FROM signal_subscriptions WHERE enabled=1') if features.allowed(r['uid'])}
-        groups={(r['symbol'],r['tf'],r['strategy']) for r in enabled_group_markets(db)}
+        # Scheduled channel_publisher owns public signals. Do not waste the
+        # provider quota scanning public markets a second time every 90 sec.
+        legacy=__import__('os').getenv('LEGACY_CHANNEL_MARKET_POSTS','false').lower()=='true'
+        groups={(r['symbol'],r['tf'],r['strategy']) for r in enabled_group_markets(db)} if legacy else set()
         return sorted(private | groups)
 
 def reminder_tick(send_fn,group_send_fn=None,now=None):
