@@ -64,7 +64,10 @@ def setup_db(db):
         channel_id INTEGER NOT NULL,
         story_id TEXT NOT NULL,
         posted_at REAL NOT NULL,
-        PRIMARY KEY(channel_id,story_id));""")
+        PRIMARY KEY(channel_id,story_id));
+    CREATE TABLE IF NOT EXISTS channel_engagement_slots (
+        channel_id INTEGER NOT NULL, day TEXT NOT NULL, kind TEXT NOT NULL,
+        posted_at REAL NOT NULL, PRIMARY KEY(channel_id,day,kind));""")
 
 def set_settings(channel,news=None,engagement=None):
     with features.connect() as db:
@@ -157,9 +160,43 @@ def format_news(item):
 def _today_dubai(now):
     return datetime.fromtimestamp(now,timezone(DUBAI)).strftime('%Y-%m-%d')
 
+ORIGINAL_LINES=[
+    "SL hit hote hi market wapas direction mein? 😅\nRisk fixed rakhna hi real skill hai.",
+    "Ek trade miss hua toh next candle chase nahi karni.\nKal bhi market khulega. 🙂",
+    "Plan follow kiya, phir bhi loss aaya?\nGood trade aur winning trade same nahi hote.",
+    "Charts pe 5 indicators add karne se patience automatic nahi aati. 😄",
+    "Trading lesson: kabhi kabhi best setup is NO TRADE.\nAgree?",
+    "Entry perfect nahi hoti. Risk defined hona chahiye.",
+    "Market roz opportunity dega.\nCapital protect karna pehli priority hai."
+]
+SHORT_QUESTIONS=[
+    "Gold mein tumhara biggest challenge kya hai — entry ya exit?",
+    "Ek setup miss ho gaya. Wait karoge ya chase?",
+    "Tum SL pehle define karte ho ya entry pehle?",
+    "London ya New York — Gold ke liye tumhari favourite session?",
+    "Trading journal daily maintain hota hai?",
+    "Do losses ke baad tumhara next rule kya hota hai?",
+    "Chart analysis mein sabse useful cheez kaunsi lagti hai?"
+]
+
+def engagement_due(now):
+    """Human-paced opportunities, not a message every hour."""
+    local=datetime.fromtimestamp(now,timezone(DUBAI))
+    day=local.strftime('%Y-%m-%d')
+    minute=local.hour*60+local.minute
+    weekday=local.weekday()
+    # 3 short questions/week, 2 polls/week, 2 original humorous notes/week.
+    if weekday in (0,2,6) and 11*60+15 <= minute < 12*60+15:
+        return day,'question'
+    if weekday in (1,3) and 15*60+10 <= minute < 16*60:
+        return day,'poll'
+    if weekday in (4,5) and 20*60+10 <= minute < 21*60+10:
+        return day,'meme'
+    return None
+
 def tick(telegram,signals,now=None):
-    """Run from the bot's single polling thread at most once per 30 minutes."""
-    now=now or time.time()
+    """One natural engagement post on selected days; verified news only."""
+    now=time.time() if now is None else now
     bootstrap_active_channels(telegram,signals)
     with features.connect() as db:
         setup_db(db)
@@ -169,42 +206,69 @@ def tick(telegram,signals,now=None):
             'ON s.group_id=c.channel_id WHERE s.enabled=1 AND '
             '(c.news_enabled=1 OR c.engagement_enabled=1)')]
     if not rows:return
-    today=_today_dubai(now)
-    news_candidates=fetch_official_news(now) if any(x['news_enabled'] and now-x['last_news_at']>=NEWS_INTERVAL_SECONDS for x in rows) else []
+    local=datetime.fromtimestamp(now,timezone(DUBAI))
+    day=local.strftime('%Y-%m-%d')
+    minute=local.hour*60+local.minute
+    due=engagement_due(now)
+    # One verified relevant headline per day, and only during sensible hours.
+    news_due=11*60 <= minute <= 20*60+30
+    news_candidates=(fetch_official_news(now) if news_due and
+        any(x['news_enabled'] and now-x['last_news_at']>=NEWS_INTERVAL_SECONDS for x in rows) else [])
     for row in rows:
         channel=row['channel_id']
-        if row['news_enabled'] and now-row['last_news_at']>=NEWS_INTERVAL_SECONDS:
-            for item in news_candidates:
-                with features.connect() as db:
-                    setup_db(db)
-                    old=db.execute('SELECT 1 FROM channel_content_posts WHERE channel_id=? AND story_id=?',
-                                   (channel,item['id'])).fetchone()
-                if old:continue
-                try:
-                    telegram('sendMessage',chat_id=channel,text=format_news(item),
-                             disable_web_page_preview=True)
+        if row['news_enabled'] and news_due and now-row['last_news_at']>=NEWS_INTERVAL_SECONDS:
+            with features.connect() as db:
+                setup_db(db)
+                already_news=db.execute(
+                    "SELECT 1 FROM channel_engagement_slots WHERE channel_id=? AND day=? AND kind='news'",
+                    (channel,day)).fetchone()
+            if not already_news:
+                for item in news_candidates:
                     with features.connect() as db:
                         setup_db(db)
-                        db.execute('INSERT OR IGNORE INTO channel_content_posts VALUES (?,?,?)',
-                                   (channel,item['id'],now))
-                        db.execute('UPDATE channel_content SET last_news_at=? WHERE channel_id=?',
-                                   (now,channel))
-                    LOG.info('Verified official news delivered to channel')
-                except Exception:
-                    LOG.warning('Could not deliver verified news to subscribed channel')
-                break
-        # One short original poll daily; no generated facts or invented market moves.
-        if row['engagement_enabled'] and row['last_engage_day']!=today:
-            question,options=POLL_QUESTIONS[datetime.fromisoformat(today).date().toordinal()%len(POLL_QUESTIONS)]
+                        old=db.execute('SELECT 1 FROM channel_content_posts WHERE channel_id=? AND story_id=?',
+                                       (channel,item['id'])).fetchone()
+                    if old:continue
+                    try:
+                        telegram('sendMessage',chat_id=channel,text=format_news(item),
+                                 disable_web_page_preview=True)
+                        with features.connect() as db:
+                            setup_db(db)
+                            db.execute('INSERT OR IGNORE INTO channel_content_posts VALUES (?,?,?)',
+                                       (channel,item['id'],now))
+                            db.execute('INSERT OR IGNORE INTO channel_engagement_slots VALUES (?,?,?,?)',
+                                       (channel,day,'news',now))
+                            db.execute('UPDATE channel_content SET last_news_at=? WHERE channel_id=?',
+                                       (now,channel))
+                        LOG.info('Verified official news delivered to channel')
+                    except Exception:
+                        LOG.warning('Could not deliver verified news to subscribed channel')
+                    break
+        if due and row['engagement_enabled']:
+            day,kind=due
+            with features.connect() as db:
+                setup_db(db)
+                exists=db.execute('SELECT 1 FROM channel_engagement_slots WHERE channel_id=? AND day=? AND kind=?',
+                                  (channel,day,kind)).fetchone()
+            if exists:continue
+            dayindex=local.toordinal()
             try:
-                telegram('sendPoll',chat_id=channel,question=question,options=options,
-                         is_anonymous=True,type='regular')
+                if kind=='poll':
+                    prompt,opts=POLL_QUESTIONS[(dayindex//7)%len(POLL_QUESTIONS)]
+                    telegram('sendPoll',chat_id=channel,question=prompt,options=opts,
+                             is_anonymous=True,type='regular')
+                else:
+                    pool=SHORT_QUESTIONS if kind=='question' else ORIGINAL_LINES
+                    content=pool[(dayindex//7+dayindex)%len(pool)]
+                    telegram('sendMessage',chat_id=channel,text=content,
+                             disable_web_page_preview=True)
                 with features.connect() as db:
                     setup_db(db)
-                    db.execute('UPDATE channel_content SET last_engage_day=? WHERE channel_id=?',(today,channel))
-                LOG.info('Engagement poll delivered to channel')
+                    db.execute('INSERT OR IGNORE INTO channel_engagement_slots VALUES (?,?,?,?)',
+                               (channel,day,kind,now))
+                LOG.info('Natural channel engagement delivered: %s',kind)
             except Exception:
-                LOG.warning('Channel engagement poll failed (check posting permission)')
-    # Keep a bounded history of posted articles.
+                LOG.warning('Channel engagement delivery failed')
     with features.connect() as db:
         db.execute('DELETE FROM channel_content_posts WHERE posted_at<?',(now-45*86400,))
+        db.execute('DELETE FROM channel_engagement_slots WHERE posted_at<?',(now-45*86400,))
