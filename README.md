@@ -30,3 +30,48 @@ Health endpoint checks polling freshness; healthy does not imply all external pr
 ## Tests
 `BOT_DB_PATH=/tmp/sr-test.sqlite3 python -m unittest -v`
 Tests mock external APIs; production provider and Telegram delivery checks are separate. Verified source pages: https://srglobalmarkets.com/ and https://srglobalmarkets.com/accounts/ (2026-10-06).
+
+
+## SR Global channel publishing rules (November 2026)
+
+Production channel publishing has a **maximum of four signal opportunities per
+Dubai calendar day**: 10:00, 13:00, 16:00 and 19:00 Asia/Dubai time.
+
+- One signal maximum **across XAUUSD, XAGUSD and BTCUSD combined** per slot.
+- Publisher validates the **fresh closed M15 candle** and existing deterministic
+  indicator alignment; no arbitrary or retroactively generated trade is posted.
+- If a candle/data source is missing, stale, NEUTRAL or a previous same-side
+  channel signal would repeat, **nothing is posted**.
+- There are no forced daily minimums, no NEUTRAL/periodic market views in
+  channels, no public reminder-countdown spam and no channel signals after 19:00.
+- Channel signal media is a **single local chart PNG plus concise caption**.
+  It contains real validated provider candles, EMA20/EMA50, Entry, SL, T1/T2.
+  This is TradingView-*style*, **not** an official TradingView Advanced Chart
+  screenshot or a separate tick-price source.
+- Legacy private opt-in notifications remain independent.
+- Channel scheduler uses SQLite deduplication persisted on the existing
+  /data volume. Old user and channel databases are left intact.
+- Channel publisher runs only if the existing Telegram poller is online.
+
+Engagement is deliberately sparse: on different weekdays, one short
+conversation question, Telegram poll or original text meme, optionally rewritten
+by Gemini for natural tone. Verified Federal Reserve and BLS RSS headlines are
+posted on an actual relevant story, at most once per channel/day.
+No fabricated news headlines or live-price claims.
+
+**Optional controls:** Set AI_ENGAGEMENT_ENABLED=false to disable paid AI
+rewrites entirely; curated original text is still posted. GEMINI_API_KEY or
+existing Gemini API Key supplies the key. The existing Telegram bot token,
+Twelve Data key, chart API key, and database must never appear in source code.
+
+**Market data:** Local plotting does not license underlying market feed for
+public redistribution. Obtain provider permission for any public commercial
+signal/chart service. A personal Twelve Data plan may be insufficient.
+Provider HTTP 429/404 failures must be resolved separately and never produce
+a synthetic signal.
+
+**Prerequisites to go live:** Railway service must be on an active plan.
+A custom trading strategy requires its exact measurable entry, confirmation,
+risk, stop, target and invalidation rules; the currently deployed source uses
+the baseline EMA20/EMA50 + RSI + MACD directional model until replaced and
+backtested. Real-world channel delivery still requires an end-to-end smoke test.
