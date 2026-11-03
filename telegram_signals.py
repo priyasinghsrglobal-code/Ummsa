@@ -294,7 +294,7 @@ def once(symbol,tf,strategy,bars,send_fn=None,group_send_fn=None,private_chart_f
                 with features.connect() as db:
                     db.execute('INSERT OR IGNORE INTO signal_delivery VALUES (?,?,?)',(sub['uid'],eid,time.time()))
             except Exception:pass
-    if group_send_fn:
+    if group_send_fn and __import__('os').getenv('LEGACY_CHANNEL_MARKET_POSTS','false').lower()=='true':
         interval=max(3600,int(__import__('os').getenv('GROUP_UPDATE_INTERVAL_SECONDS','14400')))
         for sub in groups:
             should_update=not event and (close-sub['last_update']>=interval)
