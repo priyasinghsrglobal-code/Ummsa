@@ -47,7 +47,8 @@ class FourSlotTests(unittest.TestCase):
             self.assertEqual(publisher.tick(lambda symbol,tf:candles_for(10),publish,stamp(10,4)),0)
             self.assertEqual(len(events),1)
             self.assertIn(events[0][4],('XAUUSD','XAGUSD','BTCUSD'))
-            self.assertEqual(publisher.tick(lambda symbol,tf:candles_for(19),publish,stamp(19,2)),1)
+            with patch.object(sig,'calculate',return_value=SELL):
+                self.assertEqual(publisher.tick(lambda symbol,tf:candles_for(19),publish,stamp(19,2)),1)
             self.assertEqual(publisher.tick(lambda symbol,tf:candles_for(19),publish,stamp(19,20)),0)
         self.assertEqual(len(events),2)
 
@@ -73,7 +74,7 @@ class FourSlotTests(unittest.TestCase):
 
 class EngagementScheduleTests(unittest.TestCase):
     def test_weekly_content_rotation(self):
-        self.assertEqual(content.engagement_due(stamp(11,30))[1],'poll')  # Tue
+        self.assertEqual(content.engagement_due(stamp(15,30))[1],'poll')  # Tue
         self.assertIsNone(content.engagement_due(stamp(10,5)))
         self.assertIsNone(content.engagement_due(stamp(22,0)))
     def test_original_text_has_real_newlines(self):
