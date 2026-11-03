@@ -44,7 +44,8 @@ class SignalTests(unittest.TestCase):
     def test_group_subscription_lifecycle(self):
         sig.configure_group(-100123456,'XAUUSD','15m','direction',True)
         self.assertEqual(sig.group_config(-100123456)['enabled'],1)
-        self.assertIn(('XAUUSD','15m','direction'),sig.tasks())
+        self.assertIn('XAUUSD',[r['symbol'] for r in sig.channel_markets(-100123456,True)])
+        self.assertNotIn(('XAUUSD','15m','direction'),sig.tasks())  # channel publisher owns scheduled scans
         sig.configure_group(-100123456,'XAUUSD','15m','direction',False)
         self.assertEqual(sig.group_config(-100123456)['enabled'],0)
     def test_gold_breakout_channel_auto_enable(self):
@@ -69,8 +70,9 @@ class SignalTests(unittest.TestCase):
         self.assertGreaterEqual(sig.seed_gold_silver_bitcoin_channels(),1)
         self.assertEqual({x['symbol'] for x in sig.channel_markets(gid,True)}, {'XAUUSD','XAGUSD','BTCUSD'})
         self.assertEqual(sig.seed_gold_silver_bitcoin_channels(),0)
-        self.assertIn(('XAGUSD','15m','direction'),sig.tasks())
-        self.assertIn(('BTCUSD','15m','direction'),sig.tasks())
+        active={r['symbol'] for r in sig.channel_markets(gid,True)}
+        self.assertTrue({'XAGUSD','BTCUSD'}.issubset(active))
+        self.assertNotIn(('XAGUSD','15m','direction'),sig.tasks())
         sig.disable_group_markets(gid)
         self.assertEqual(sig.channel_markets(gid,True),[])
     def test_extra_market_can_be_removed_without_affecting_gold(self):
