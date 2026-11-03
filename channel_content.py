@@ -17,6 +17,7 @@ import xml.etree.ElementTree as ET
 from datetime import datetime, timezone, timedelta
 
 import features
+import engagement_ai
 
 LOG=logging.getLogger('sr')
 RSS_SOURCES=(
@@ -260,6 +261,7 @@ def tick(telegram,signals,now=None):
                 else:
                     pool=SHORT_QUESTIONS if kind=='question' else ORIGINAL_LINES
                     content=pool[(dayindex//7+dayindex)%len(pool)]
+                    content=engagement_ai.rewrite(kind,content)
                     telegram('sendMessage',chat_id=channel,text=content,
                              disable_web_page_preview=True)
                 with features.connect() as db:
