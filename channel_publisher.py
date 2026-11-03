@@ -21,6 +21,8 @@ SLOTS=(10,13,16,19)
 MARKETS=("XAUUSD","XAGUSD","BTCUSD")
 TIMEFRAME="15m"
 WINDOW_SECONDS=9*60
+# Avoid repeated market-data calls within the same slot and reduce provider 429s.
+_recent_checks={}
 
 def setup_db(db):
     db.executescript("""CREATE TABLE IF NOT EXISTS channel_signal_slots(
@@ -39,7 +41,7 @@ def slot_at(now):
     for hour in SLOTS:
         base=local.replace(hour=hour,minute=0,second=0,microsecond=0)
         lag=now-base.timestamp()
-        if 0 <= lag <= WINDOW_SECONDS:
+        if 90 <= lag <= WINDOW_SECONDS:
             return (local.date().isoformat(),hour,base.timestamp())
     return None
 
@@ -67,6 +69,15 @@ def tick(candles_fn,publish_fn,now=None):
     slot=slot_at(now)
     if not slot:return 0
     day,hour,close_target=slot
+    check_key=(day,hour)
+    # Retry transient feed failures no faster than every 120 seconds. A
+    # healthy complete analysis is evaluated just once per slot.
+    last=_recent_checks.get(check_key)
+    if last and (last[1] or now-last[0]<120):return 0
+    _recent_checks[check_key]=(now,False)
+    if len(_recent_checks)>32:
+        _recent_checks.clear()
+        _recent_checks[check_key]=(now,False)
     with features.connect() as db:
         signals.setup_db(db)
         setup_db(db)
@@ -86,11 +97,13 @@ def tick(candles_fn,publish_fn,now=None):
     start=(hour//3+int(day[-2:]))%len(MARKETS)
     order=MARKETS[start:]+MARKETS[:start]
     candidates={}
+    feed_ok=False
     for symbol in order:
         if not any(symbol in markets for markets in eligible.values()):
             continue
         try:
             bars=candles_fn(symbol,TIMEFRAME)
+            feed_ok=True
             candle_close=bars[-1]["t"]+TIMEFRAMES[TIMEFRAME][1]
             if not (close_target<=candle_close<=now):
                 continue
@@ -101,6 +114,7 @@ def tick(candles_fn,publish_fn,now=None):
             LOG.warning("Channel signal data invalid for %s: %s",symbol,type(exc).__name__)
         except Exception:
             LOG.warning("Channel signal feed temporarily unavailable for %s",symbol)
+    if feed_ok:_recent_checks[check_key]=(now,True)
     sent=0
     for group,markets in eligible.items():
         for symbol in order:
