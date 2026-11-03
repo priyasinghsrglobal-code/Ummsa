@@ -8,6 +8,7 @@ from mentor import route, snapshot, TV
 import features
 import telegram_signals as signals
 import channel_content
+import channel_publisher
 
 log=logging.getLogger('sr');logging.basicConfig(level=logging.INFO,format='%(levelname)s %(message)s')
 TOKEN=os.environ.get('TELEGRAM_BOT_TOKEN',''); KEY=os.environ.get('TWELVE_DATA_API_KEY','')
@@ -37,9 +38,12 @@ def buttons(items):
     cells=[{'text':label,'callback_data':data} for label,data in items]
     return [cells[i:i+2] for i in range(0,len(cells),2)]
 
-def photo(chat,png):
+def photo(chat,png,caption=None):
     boundary='SRMarketViewUploadBoundary'
-    body=(f'--{boundary}\r\nContent-Disposition: form-data; name="chat_id"\r\n\r\n{chat}\r\n--{boundary}\r\nContent-Disposition: form-data; name="photo"; filename="chart.png"\r\nContent-Type: image/png\r\n\r\n').encode()+png+f'\r\n--{boundary}--\r\n'.encode()
+    prefix=(f'--{boundary}\r\nContent-Disposition: form-data; name="chat_id"\r\n\r\n{chat}\r\n').encode()
+    if caption:
+        prefix+=(f'--{boundary}\r\nContent-Disposition: form-data; name="caption"\r\n\r\n{caption[:1024]}\r\n').encode()
+    body=prefix+(f'--{boundary}\r\nContent-Disposition: form-data; name="photo"; filename="chart.png"\r\nContent-Type: image/png\r\n\r\n').encode()+png+f'\r\n--{boundary}--\r\n'.encode()
     result=request(f'https://api.telegram.org/bot{TOKEN}/sendPhoto',body,{'Content-Type':f'multipart/form-data; boundary={boundary}'})
     if not result.get('ok'):raise DataError('Chart delivery failed. Please retry.')
 
@@ -465,23 +469,7 @@ def channel_command(update):
     log.info('Channel broadcasts enabled: %s %s %s',symbol,tf,strategy)
     send(channel,f'✅ Channel alerts ON | {symbol} {tf.upper()} | {strategy}\n'
                  'Automatic BUY/SELL changes and periodic closed-candle market updates.')
-    # Send an immediate current snapshot, never a fabricated historical BUY/SELL alert.
-    try:
-        bars=candles(symbol,tf)
-        result=signals.calculate(bars,symbol,tf,strategy)
-        send(channel,signals.format_group_update(result,bars,symbol,tf))
-        with features.connect() as db:
-            signals.setup_db(db)
-            db.execute('UPDATE signal_groups SET last_update=? WHERE group_id=? AND enabled=1',
-                       (bars[-1]['t']+TIMEFRAMES[tf][1],channel))
-        log.info('Channel initial market update delivered')
-    except DataError as exc:
-        log.warning('Channel initial market data unavailable: %s',str(exc))
-        send(channel,'Initial live market data unavailable. Auto-scans remain enabled; '
-                     'no signal is issued without verified candles.')
-    except Exception:
-        log.warning('Channel initial snapshot failed; auto-scans remain configured')
-        send(channel,'Initial market update could not load. Scheduled monitoring remains ON.')
+    # No neutral/market snapshot or unscheduled signals on channel configuration.
 
 
 def group_admin(chat,uid):
@@ -521,14 +509,15 @@ def group_command(update):
     send(chat,f'✅ Group broadcasts ON — {symbol} {tf.upper()} ({strategy}).\nNew BUY/SELL changes + periodic market updates. First scan is a baseline, not a historical alert.')
 
 def group_broadcast(chat,message,bars,result,symbol,tf):
-    send(chat,message)
+    """Send a single chart+caption Telegram post, not two crowded messages."""
     if result.get('side') not in ('BUY','SELL') or not result.get('entry'):
         return
     try:
         from chart import signal_render
-        photo(chat,signal_render(bars,symbol,tf,result))
+        photo(chat,signal_render(bars,symbol,tf,result),caption=message)
     except Exception:
-        log.warning('Group signal chart unavailable; text signal was delivered')
+        log.warning('Channel chart delivery failed; sending concise text signal')
+        send(chat,message)
 
 
 def handle(update):
@@ -637,7 +626,7 @@ def main():
             updates=telegram('getUpdates',offset=offset,timeout=25,allowed_updates=['message','callback_query','channel_post'])
             last_poll=time.time()
             deliver_reminders()
-            try:signals.reminder_tick(send,lambda target,message:send(target,message))
+            try:signals.reminder_tick(send)
             except Exception:log.warning('Forming-setup reminder cycle failed')
             if time.time()>=next_signal_scan:
                 next_signal_scan=time.time()+max(90,int(os.getenv('TELEGRAM_SIGNAL_SCAN_SECONDS','90')))
@@ -647,10 +636,13 @@ def main():
                     try:
                         bars=candles(symbol,tf)
                         signals.once(symbol,tf,strategy,bars,send,
-                            lambda chat,msg,bars,result:group_broadcast(chat,msg,bars,result,symbol,tf),
+                            None,
                             lambda uid,bars,result:photo(uid,__import__('chart').signal_render(bars,symbol,tf,result)))
                     except DataError as exc:log.warning('Signal scan paused: %s',str(exc))
                     except Exception:log.warning('Signal scan failed; retry at next interval')
+            # Channel signals only in four fixed Dubai time slots.
+            try:channel_publisher.tick(candles,group_broadcast)
+            except Exception:log.warning('Scheduled channel signal cycle unavailable')
             if time.time()>=next_content_scan:
                 next_content_scan=time.time()+1800
                 try:channel_content.tick(telegram,signals)
